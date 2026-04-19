@@ -1,10 +1,13 @@
+[build-system]
+requires = ["hatchling>=1.27", "hatch-vcs>=0.4"]
+build-backend = "hatchling.build"
+
 [project]
 name = "ikfastpy"
-version = "0.0.0"
 description = "Standalone Python implementation of the IKFast analytic inverse kinematics solver."
 readme = "README.md"
 license = { text = "LGPL-3.0-or-later" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Siddhartha Srinivasa" }]
 keywords = ["robotics", "inverse-kinematics", "ikfast", "kinematics"]
 classifiers = [
@@ -12,37 +15,59 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "numpy>=1.24",
-    "sympy",  # version pin TBD in M1 (#6)
-    "yourdfpy>=0.0.50",
+    "numpy>=2.0",
 ]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=7",
-    "ruff",
-    "mypy",
-]
+dynamic = ["version"]
 
 [project.urls]
 Repository = "https://github.com/siddhss5/ikfastpy"
 Issues = "https://github.com/siddhss5/ikfastpy/issues"
 
-# Build system left intentionally unset until M3 (#10) wires up scikit-build-core + cmake.
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+# PEP 735 dependency groups — for tooling that's not an "extra" of the package.
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/ikfastpy/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ikfastpy"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "RUF",      # ruff-specific
+    "SIM",      # simplify
+    "PT",       # pytest style
+]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
