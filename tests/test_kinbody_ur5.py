@@ -37,15 +37,6 @@ def test_forward_kinematics_chain_runs() -> None:
     assert len(links_raw) >= 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=RecursionError,
-    reason=(
-        "Vendored SimplifyAtan2 infinite-recurses on sympy 1.14 during "
-        "solveFullIK_Translation3D. Tracked in #28 — flip to expected-pass "
-        "when resolved."
-    ),
-)
 def test_generate_ik_solver_produces_output() -> None:
     """Full issue #5 criterion: ``generateIkSolver`` returns sympy output.
 
@@ -54,11 +45,6 @@ def test_generate_ik_solver_produces_output() -> None:
     generate → solve pipeline. A Transform6D solve on UR5 with no free
     joints can take many minutes and is orthogonal to the "does the shim
     work" question this test is answering.
-
-    Currently xfail-blocked on #28 (vendored SimplifyAtan2 interaction with
-    sympy 1.14). The shim itself is verified by
-    :func:`test_forward_kinematics_chain_runs`, which exercises every method
-    the solver calls on the kinbody/joint/link.
     """
     from fixtures.ur5 import ur5_specs
     from ikfastpy._kinbody import build_kinbody
