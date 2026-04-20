@@ -85,7 +85,10 @@ follow_imports_for_stubs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-ra", "--strict-markers"]
+addopts = ["-ra", "--strict-markers", "-m", "not slow"]
+markers = [
+    "slow: symbolic IK generation tests that run on the order of seconds to minutes; opt in with `-m slow`",
+]
 filterwarnings = [
     # Upstream ikfast.py uses unraw regex literals like '\d', '\g'. They render
     # correctly at runtime but emit SyntaxWarning on Python 3.12+. Out of scope
