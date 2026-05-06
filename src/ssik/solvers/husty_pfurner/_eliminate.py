@@ -60,6 +60,7 @@ Both paths consume the same ``EliminatePrecompute`` per-arm cache
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 
 import numpy as np
@@ -170,17 +171,52 @@ class EliminatePrecompute:
         This is ``T(v_6)`` BEFORE the ``sigma_E^*`` left-multiplication.
         At IK call time, the runtime multiplies by an 8x8 matrix derived
         from ``sigma_E`` to get the final ``T_w``.
+    :ivar parametric_var: which joint variable the ``u`` axis represents.
+        ``"v_1"`` for the default ``T(v_1)`` left-chain parametrization;
+        ``"v_2"`` for ``T(v_2)`` (RRR double-degenerate fallback per
+        Capco; #176). The back-substitution path branches on this --
+        recovering different joint-tuples from the ``(u, w)`` pair.
+    :ivar tv2_case_key: the Capco RRR Tv2 sub-case key when
+        ``parametric_var == "v_2"`` (one of
+        :data:`ssik.solvers.husty_pfurner._constraints.TV2_RRR_CASE_KEYS`).
+        ``None`` for the ``T(v_1)`` path.
+    :ivar right_parametric_var: which joint variable the ``w`` axis
+        represents on the right chain. ``"v_6"`` (default) for the
+        outer-mirror ``T(v_6)`` path; ``"v_4"`` for the inner-mirror
+        ``T(v_4)`` path (#177). T(v_4) is dispatched when ``T(v_6)``
+        coefficients structurally vanish on the Capco-Tv1 nullspace
+        for the given DH (e.g. locked-Franka with ``a_4 = 0``).
     """
 
-    __slots__ = ("T_u", "T_w_pre")
+    __slots__ = ("T_u", "T_w_pre", "parametric_var", "right_parametric_var", "tv2_case_key")
 
-    def __init__(self, T_u: NDArray[np.float64], T_w_pre: NDArray[np.float64]) -> None:
+    def __init__(
+        self,
+        T_u: NDArray[np.float64],
+        T_w_pre: NDArray[np.float64],
+        parametric_var: str = "v_1",
+        tv2_case_key: str | None = None,
+        right_parametric_var: str = "v_6",
+    ) -> None:
         if T_u.shape != (4, 8, 2):
             raise ValueError(f"T_u must be (4, 8, 2), got {T_u.shape}")
         if T_w_pre.shape != (4, 8, 2):
             raise ValueError(f"T_w_pre must be (4, 8, 2), got {T_w_pre.shape}")
+        if parametric_var not in ("v_1", "v_2"):
+            raise ValueError(f"parametric_var must be 'v_1' or 'v_2', got {parametric_var!r}")
+        if right_parametric_var not in ("v_6", "v_4"):
+            raise ValueError(
+                f"right_parametric_var must be 'v_6' or 'v_4', got {right_parametric_var!r}"
+            )
+        if parametric_var == "v_2" and tv2_case_key is None:
+            raise ValueError("parametric_var='v_2' requires tv2_case_key to be set")
+        if parametric_var == "v_1" and tv2_case_key is not None:
+            raise ValueError("parametric_var='v_1' should not carry a tv2_case_key")
         self.T_u = T_u.astype(np.float64, copy=True)
         self.T_w_pre = T_w_pre.astype(np.float64, copy=True)
+        self.parametric_var = parametric_var
+        self.tv2_case_key = tv2_case_key
+        self.right_parametric_var = right_parametric_var
 
 
 def extract_uv_linear_tensor(M_sym: sp.Matrix, var: sp.Symbol) -> NDArray[np.float64]:
@@ -221,6 +257,9 @@ def precompute_from_sympy(
     u_sym: sp.Symbol,
     T_w_pre_sym: sp.Matrix,
     w_sym: sp.Symbol,
+    parametric_var: str = "v_1",
+    tv2_case_key: str | None = None,
+    right_parametric_var: str = "v_6",
 ) -> EliminatePrecompute:
     """Build per-arm :class:`EliminatePrecompute` from sympy matrices.
 
@@ -228,12 +267,87 @@ def precompute_from_sympy(
     :param T_w_pre_sym: 4x8 sympy matrix; entries linear in ``w_sym``, DH
         numeric, but BEFORE ``sigma_E^*`` left-multiplication. (``T_w`` then
         equals ``T_w_pre @ M(sigma_E)`` at IK time -- linear in ``sigma_E``.)
+    :param parametric_var: which joint variable ``u_sym`` represents
+        (``"v_1"`` or ``"v_2"``). Forwarded to
+        :class:`EliminatePrecompute`.
+    :param tv2_case_key: when ``parametric_var=="v_2"``, the Capco RRR
+        Tv2 sub-case key. Forwarded to :class:`EliminatePrecompute`.
+    :param right_parametric_var: which joint variable ``w_sym`` represents
+        (``"v_6"`` or ``"v_4"``). Forwarded to
+        :class:`EliminatePrecompute`.
     """
     T_u = extract_uv_linear_tensor(T_u_sym, u_sym)
     T_w_pre = extract_uv_linear_tensor(T_w_pre_sym, w_sym)
-    return EliminatePrecompute(T_u, T_w_pre)
+    return EliminatePrecompute(T_u, T_w_pre, parametric_var, tv2_case_key, right_parametric_var)
 
 
+_TV1_DEGEN_WARNED: set[tuple[float, ...]] = set()
+_HP_DEGEN_TOL = 1e-9
+_LOG = __import__("logging").getLogger(__name__)
+
+
+def _check_hp_preconditions(a_1: float, l_1: float, a_2: float, l_2: float) -> None:
+    """Detect Capco eq. (5) degenerate cases for the RRR pattern and warn.
+
+    Verified by reading Capco's ``which_case.py:74-80`` directly (see
+    ``reference_capco_hp_dispatch`` memory entry). The RRR dispatch is:
+
+    * ``T(v_1)`` applies when ``a_2 != 0 AND l_2 != 0``
+      (eq. 5 simplified-form non-degenerate).
+    * ``T(v_3)`` applies when ``(a_2 = 0 OR l_2 = 0) AND a_1 != 0 AND l_1 != 0``.
+    * ``T(v_2)`` (sub-case-keyed) applies when both are degenerate:
+      ``(a_2 = 0 OR l_2 = 0) AND (a_1 = 0 OR l_1 = 0)``.
+
+    The previously-shipped check used the RRP-specific ``|l_2| = ±1``
+    condition by mistake. Corrected here.
+
+    This function logs a one-time WARNING per degenerate DH-tuple so
+    callers can audit which arms/configurations are affected without
+    spamming on every IK call. It deliberately does NOT raise -- the
+    partial IK set ``T(v_1)`` returns on these arms is still useful;
+    full IK coverage requires the missing parametrizations.
+    """
+    a2_zero = abs(a_2) < _HP_DEGEN_TOL
+    l2_zero = abs(l_2) < _HP_DEGEN_TOL
+    a1_zero = abs(a_1) < _HP_DEGEN_TOL
+    l1_zero = abs(l_1) < _HP_DEGEN_TOL
+    if not (a2_zero or l2_zero):
+        return  # T(v_1) precondition holds; no warning needed.
+    key = (round(a_1, 9), round(l_1, 9), round(a_2, 9), round(l_2, 9))
+    if key in _TV1_DEGEN_WARNED:
+        return
+    _TV1_DEGEN_WARNED.add(key)
+    if a1_zero or l1_zero:
+        _LOG.warning(
+            "husty_pfurner: HP T(v_1) parametrization degenerate for this DH "
+            "(a_1=%.3e, l_1=%.3e, a_2=%.3e, l_2=%.3e): both eq.5 simplified "
+            "preconditions violated -- (a_1=0 OR l_1=0) AND (a_2=0 OR l_2=0). "
+            "Capco's RRR Tv2 sub-case keyed by which DH params are zero is "
+            "required (see #176). Locked-7R configurations on Franka / KUKA "
+            "iiwa LBR / xArm7 hit the case [a_1=0, a_2=0]. Proceeding with "
+            "T(v_1) anyway -- partial IK set is still useful but some "
+            "branches are silently missed.",
+            a_1,
+            l_1,
+            a_2,
+            l_2,
+        )
+    else:
+        _LOG.warning(
+            "husty_pfurner: HP T(v_1) parametrization degenerate for this DH "
+            "(a_1=%.3e, l_1=%.3e, a_2=%.3e, l_2=%.3e): a_2=0 OR l_2=0 with "
+            "a_1, l_1 != 0 -- T(v_3) (already coded in _constraints.py but not "
+            "yet wired into back-substitution, see #180) is the well-conditioned "
+            "alternative. Proceeding with T(v_1) -- some IK branches may be "
+            "silently missed.",
+            a_1,
+            l_1,
+            a_2,
+            l_2,
+        )
+
+
+@functools.lru_cache(maxsize=128)
 def precompute_rrr_chain(
     a_1: float,
     l_1: float,
@@ -262,28 +376,131 @@ def precompute_rrr_chain(
     joint 6 is assumed to have ``a_6 = d_6 = l_6 = 0`` (Capco convention --
     EE offset is absorbed into ``sigma_E`` at IK call time).
 
+    Wrapped in :func:`functools.lru_cache`: the DH parameters are arm
+    constants, so a typical end-user IK loop calls ``precompute_rrr_chain``
+    with the same 14 floats every IK and only pays the ~50 ms sympy
+    boilerplate once per arm. The cache key is the 14-tuple of Python
+    floats; downstream code never mutates the returned tensors so sharing
+    the same instance across calls is safe.
+
+    HP coverage matrix (RRR pattern; Capco eq. 5 simplified-form
+    degeneracy criterion verified against ``which_case.py:74-80``):
+
+    +-----------+----------------------------------------------------+--------+
+    | Variant   | Applies when                                       | Status |
+    +===========+====================================================+========+
+    | Left:     |                                                    |        |
+    | T(v_1)    | ``a_2 != 0 ∧ l_2 != 0``                            | OK     |
+    | T(v_3)    | ``(a_2 = 0 OR l_2 = 0) ∧ a_1 != 0 ∧ l_1 != 0``      | #180   |
+    | T(v_2)    | ``(a_2 = 0 OR l_2 = 0) ∧ (a_1 = 0 OR l_1 = 0)``,     | #176   |
+    |           | sub-case keyed by which DH param(s) are zero       |        |
+    |           | -- 4 RRR sub-cases: ``[a_1=0,a_2=0]``,             |        |
+    |           | ``[a_1=0,l_2=0]``, ``[l_1=0,a_2=0]``,              |        |
+    |           | ``[l_1=0,l_2=0]``                                  |        |
+    +-----------+----------------------------------------------------+--------+
+    | Right:    |                                                    |        |
+    | T(v_6)    | ``a_4 != 0 ∧ l_4 != 0``  (mirror of Tv1)           | OK     |
+    | T(v_4)    | ``(a_4 = 0 OR l_4 = 0) ∧ a_5 != 0 ∧ l_5 != 0``      | OK     |
+    |           |   (mirror of Tv3, #177)                            |        |
+    | T(v_5)    | ``(a_4 = 0 OR l_4 = 0) ∧ (a_5 = 0 OR l_5 = 0)``      | TODO   |
+    +-----------+----------------------------------------------------+--------+
+
+    Dispatch logic: left chain uses T(v_1) (Tv2/Tv3 unwired); right chain
+    auto-dispatches T(v_6) -> T(v_4) when (a_4 = 0 OR l_4 = 0) AND
+    (a_5 != 0 AND l_5 != 0). When BOTH right chain DH groups degenerate,
+    falls back to T(v_6) (still degenerate -- some IK branches missed,
+    needs T(v_5) per #177 stretch goal).
+
+    Important: Tv4 alone does NOT close the locked-7R gap. Locked Franka /
+    KUKA iiwa LBR / xArm7 hit **left** Tv2 sub-case ``[a_1=0, a_2=0]``
+    AND **right** Tv4 case simultaneously. Both fixes are needed for
+    full locked-7R coverage; #176 (Tv2) is the remaining blocker.
+
     :raises ValueError: if any DH-derived T(v_i) entry has degree > 1 in
         the parametrising symbol (indicates a degenerate DH where the
         pure-tan-half-angle parametrisation breaks down).
     """
+    _check_hp_preconditions(a_1, l_1, a_2, l_2)
+
     from ssik.solvers.husty_pfurner._constraints import (
         _V1_SYM,
+        _V3_SYM,
+        _V4_SYM,
         _V6_SYM,
         tv1_symbolic_in_v1,
+        tv3_symbolic_in_v3,
     )
 
+    # Right-chain dispatch (#177): T(v_6) is the default outer-mirror
+    # parametrisation but its coefficients structurally vanish on the
+    # Capco-Tv1 nullspace when (a_4 = 0 OR l_4 = 0). In that regime the
+    # 8x8 Cramer system goes rank-deficient and IK candidates are silently
+    # missed (locked-Franka with a_4 = 0 is the canonical case). Dispatch
+    # the inner-mirror T(v_4) instead -- it has the same precondition as
+    # T(v_6) (a_5 != 0 AND l_5 != 0) but survives the (a_4, l_4) -> 0
+    # pathology because the joint-4 DH lands in a different coefficient
+    # slot of the underlying T(v_3) construction.
+    a4_zero = abs(a_4) < _HP_DEGEN_TOL
+    l4_zero = abs(l_4) < _HP_DEGEN_TOL
+    a5_zero = abs(a_5) < _HP_DEGEN_TOL
+    l5_zero = abs(l_5) < _HP_DEGEN_TOL
+    use_tv4 = (a4_zero or l4_zero) and not (a5_zero or l5_zero)
+
+    if use_tv4:
+        T_w_pre_sym = tv3_symbolic_in_v3(
+            a_1=-a_5,
+            l_1=-l_5,
+            d_2=-d_5,
+            a_2=-a_4,
+            l_2=-l_4,
+            d_3=-d_4,
+            a_3=0.0,
+            l_3=0.0,
+        ).subs(_V3_SYM, -_V4_SYM)
+        right_w_sym = _V4_SYM
+        right_param = "v_4"
+    else:
+        T_w_pre_sym = tv1_symbolic_in_v1(
+            a_1=-a_5,
+            l_1=-l_5,
+            d_2=-d_5,
+            a_2=-a_4,
+            l_2=-l_4,
+            d_3=-d_4,
+            a_3=0.0,
+            l_3=0.0,
+        ).subs(_V1_SYM, -_V6_SYM)
+        right_w_sym = _V6_SYM
+        right_param = "v_6"
+
+    # Left-chain dispatch SCAFFOLDING (currently always uses Tv1, even
+    # when degenerate): the symbolic Tv2 hyperplanes are ready
+    # (``ssik.solvers.husty_pfurner._constraints.tv2_symbolic_in_v2``,
+    # ``tv2_hyperplanes_rrr``) and the back-sub variant
+    # (``_back_substitute._back_sub_tv2_left``) is implemented, but the
+    # 8x8 Cramer + Sylvester pencil **elimination architecture** in
+    # ``compute_fg_numeric`` / ``_cramer_8vec_via_interp`` currently
+    # only handles the rank-7 system T_v1 produces. The Tv2 case
+    # substitution adds extra V_L hyperplanes (kernel dim of the
+    # 12x16 matrix can be > 4 at the case-substituted DH), so the
+    # downstream stacked 8x8 system has rank 6 (kernel dim 2) at the
+    # IK -- Cramer fails to extract a 1-D kernel.
+    #
+    # Fixing this requires re-architecting the elimination to handle
+    # m-of-n linear systems with m > n + 1 (i.e. accept all kernel
+    # basis vectors from Tv2's case-substituted 12x16, stack them
+    # with T_w, take the rank-7 stacked system's kernel via SVD with
+    # Study-quadric disambiguation). Substantial work; the partial
+    # Tv2 infrastructure landing here is the foundation.
     T_u_sym = tv1_symbolic_in_v1(a_1, l_1, d_2, a_2, l_2, d_3, a_3, l_3).subs(_V1_SYM, _V1_SYM)
-    T_w_pre_sym = tv1_symbolic_in_v1(
-        a_1=-a_5,
-        l_1=-l_5,
-        d_2=-d_5,
-        a_2=-a_4,
-        l_2=-l_4,
-        d_3=-d_4,
-        a_3=0.0,
-        l_3=0.0,
-    ).subs(_V1_SYM, -_V6_SYM)
-    return precompute_from_sympy(T_u_sym, _V1_SYM, T_w_pre_sym, _V6_SYM)
+    return precompute_from_sympy(
+        T_u_sym,
+        _V1_SYM,
+        T_w_pre_sym,
+        right_w_sym,
+        parametric_var="v_1",
+        right_parametric_var=right_param,
+    )
 
 
 def _apply_sigma_e_to_tw_pre(
@@ -404,6 +621,24 @@ def _dropped_row_g(
     return out
 
 
+def _compute_fg_with_tw(
+    T_u: NDArray[np.float64],
+    T_w: NDArray[np.float64],
+    drop_idx: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Cramer + Study-quadric + dropped-row substitution given the
+    pre-computed ``T_u`` and ``T_w`` tensors. Internal hot-path helper:
+    ``T_w = _apply_sigma_e_to_tw_pre(pre.T_w_pre, sigma_E)`` is
+    drop-independent, so multi-drop callers compute it once and reuse.
+    """
+    if not 0 <= drop_idx < 8:
+        raise ValueError(f"drop_idx must be in [0, 8), got {drop_idx}")
+    P_coef = _cramer_8vec_via_interp(T_u, T_w, drop_idx)
+    f = _study_quadric_f(P_coef)
+    g = _dropped_row_g(T_u, T_w, P_coef, drop_idx)
+    return f, g
+
+
 def compute_fg_numeric(
     pre: EliminatePrecompute,
     sigma_E: NDArray[np.float64],
@@ -417,14 +652,9 @@ def compute_fg_numeric(
     :returns: ``(f, g)`` where ``f`` is ``(9, 7)`` and ``g`` is ``(6, 5)``.
         Indexing is ``f[i, j] = coeff of u^i w^j``.
     """
-    if not 0 <= drop_idx < 8:
-        raise ValueError(f"drop_idx must be in [0, 8), got {drop_idx}")
     sigma_E_arr = np.asarray(sigma_E, dtype=np.float64)
     T_w = _apply_sigma_e_to_tw_pre(pre.T_w_pre, sigma_E_arr)
-    P_coef = _cramer_8vec_via_interp(pre.T_u, T_w, drop_idx)
-    f = _study_quadric_f(P_coef)
-    g = _dropped_row_g(pre.T_u, T_w, P_coef, drop_idx)
-    return f, g
+    return _compute_fg_with_tw(pre.T_u, T_w, drop_idx)
 
 
 # =============================================================================
@@ -521,6 +751,96 @@ _NEWTON_RESIDUE_TOL = 1e-12
 # clear all benign starting points; five gives slack for poorly-conditioned
 # Jacobians without unbounded cost.
 _NEWTON_MAX_ITER = 5
+
+
+def _refine_uw_inline(
+    f: NDArray[np.float64],
+    g: NDArray[np.float64],
+    u0: float,
+    w0: float,
+    max_iter: int,
+    tol: float,
+) -> tuple[float, float, float]:
+    """Inline 2x2 Newton on ``[f(u, w), g(u, w)] = 0`` with monotone-best
+    tracking. Faster equivalent of
+    :func:`ssik._pencil.newton_refine_system` for HP-shaped (small,
+    fixed-degree) polynomial systems: avoids closure dispatch, pre-builds
+    derivatives, and evaluates ``p @ w_pow @ u_pow`` via two
+    explicit matvecs per derivative instead of the
+    ``np.polynomial.polynomial.polyval2d`` ufunc path.
+
+    Per Newton iter cost in this inlined version:
+    ~0.05 ms (1 ms in the closure path), so ~10x cheaper on the inner
+    Newton loop. The (u, w) trajectory and convergence behaviour match
+    :func:`newton_refine_system` exactly: same monotone-best invariant,
+    same residue scaling.
+
+    :returns: ``(u_refined, w_refined, residue)``. Caller must reject
+        ``residue > tol`` candidates as spurious.
+    """
+    np_p, nq_p = f.shape
+    np_g, nq_g = g.shape
+    f_du = f[1:, :] * np.arange(1, np_p, dtype=np.float64)[:, None]
+    f_dw = f[:, 1:] * np.arange(1, nq_p, dtype=np.float64)[None, :]
+    g_du = g[1:, :] * np.arange(1, np_g, dtype=np.float64)[:, None]
+    g_dw = g[:, 1:] * np.arange(1, nq_g, dtype=np.float64)[None, :]
+    abs_f = np.abs(f)
+    abs_g = np.abs(g)
+    max_f = float(np.max(abs_f))
+    max_g = float(np.max(abs_g))
+    max_deg_u = max(np_p, np_g) - 1
+    max_deg_w = max(nq_p, nq_g) - 1
+
+    def _eval(u: float, w: float) -> tuple[float, float, float, float, float, float, float, float]:
+        # Powers of u and w up to the max degree across f, g, and their
+        # derivatives. One numpy.power call per axis amortises across
+        # the 6 polynomial evaluations (f, g, fdu, fdw, gdu, gdw) plus
+        # the 2 abs_* evaluations the scale needs.
+        u_pow = u ** np.arange(max_deg_u + 1)
+        w_pow = w ** np.arange(max_deg_w + 1)
+        u_abs_pow = abs(u) ** np.arange(max_deg_u + 1)
+        w_abs_pow = abs(w) ** np.arange(max_deg_w + 1)
+        # The slicing here is the only place shape-dependent indexing
+        # touches the inner loop. Each ``A @ B @ C`` reduces to
+        # one matvec + one dot, fixed cost.
+        f_val = float(u_pow[:np_p] @ f @ w_pow[:nq_p])
+        g_val = float(u_pow[:np_g] @ g @ w_pow[:nq_g])
+        fdu_val = float(u_pow[: np_p - 1] @ f_du @ w_pow[:nq_p])
+        fdw_val = float(u_pow[:np_p] @ f_dw @ w_pow[: nq_p - 1])
+        gdu_val = float(u_pow[: np_g - 1] @ g_du @ w_pow[:nq_g])
+        gdw_val = float(u_pow[:np_g] @ g_dw @ w_pow[: nq_g - 1])
+        # natural scales: max of global max-coeff and the pointwise
+        # absolute-coeff polyval. See _build_fg_closures.scale for the
+        # rationale.
+        scale_f = max(float(u_abs_pow[:np_p] @ abs_f @ w_abs_pow[:nq_p]), max_f)
+        scale_g = max(float(u_abs_pow[:np_g] @ abs_g @ w_abs_pow[:nq_g]), max_g)
+        return f_val, g_val, fdu_val, fdw_val, gdu_val, gdw_val, scale_f, scale_g
+
+    u, w = float(u0), float(w0)
+    f_val, g_val, _, _, _, _, sf, sg = _eval(u, w)
+    best_residue = max(abs(f_val) / max(sf, 1e-300), abs(g_val) / max(sg, 1e-300))
+    best_u, best_w = u, w
+    for _ in range(max_iter):
+        if best_residue < tol:
+            break
+        f_val, g_val, fdu, fdw, gdu, gdw, _sf, _sg = _eval(u, w)
+        det = fdu * gdw - fdw * gdu
+        if det == 0.0 or not np.isfinite(det):
+            break
+        inv_det = 1.0 / det
+        # 2x2 inverse times -[f_val; g_val]. Exact (no LU dispatch).
+        du = -inv_det * (gdw * f_val - fdw * g_val)
+        dw = -inv_det * (-gdu * f_val + fdu * g_val)
+        if not (np.isfinite(du) and np.isfinite(dw)):
+            break
+        u_new = u + du
+        w_new = w + dw
+        f_new, g_new, _, _, _, _, sf_new, sg_new = _eval(u_new, w_new)
+        residue_new = max(abs(f_new) / max(sf_new, 1e-300), abs(g_new) / max(sg_new, 1e-300))
+        u, w = u_new, w_new
+        if residue_new < best_residue:
+            best_u, best_w, best_residue = u_new, w_new, residue_new
+    return best_u, best_w, best_residue
 
 
 def _initial_w_for(f: NDArray[np.float64], g: NDArray[np.float64], u0: float) -> float | None:
@@ -634,6 +954,7 @@ def eliminate_uw_pairs(
     *,
     drop_indices: tuple[int, ...] = (7, 4, 0),
     residue_tol: float = _NEWTON_RESIDUE_TOL,
+    accept_residue_tol: float | None = None,
 ) -> NDArray[np.float64]:
     """Run the HP elimination pipeline; return refined ``(u, w)`` pairs.
 
@@ -643,6 +964,21 @@ def eliminate_uw_pairs(
     :func:`eliminate_uw_numeric` wraps this and projects to ``u`` only
     for callers that need just the ``v_1`` candidates.
 
+    :param residue_tol: Newton's early-exit tolerance. Iterations stop
+        as soon as the best-so-far ``[f, g]`` residue is below this.
+        Default ``1e-12`` (full algebraic precision).
+    :param accept_residue_tol: post-Newton acceptance threshold. A
+        candidate's ``(u, w)`` is kept iff its best-so-far residue is
+        below this. Default ``residue_tol`` (i.e. only fully-converged
+        candidates -- the strict semantics ``eliminate_uw_numeric``
+        callers expect). HP's ``general_6r`` solver passes a much
+        looser threshold here because the downstream ``lm_refine`` in
+        ``verify_candidates`` operates on 6-D joint-space and recovers
+        IK candidates that pass-1 (this Newton, in 2-D ``(u, w)``)
+        couldn't push to ``residue_tol`` due to multi-root degeneracy.
+        Filtering at ``residue_tol`` here was rejecting real-but-multi-
+        root candidates that were physically valid IK solutions.
+
     :returns: 2-D array of shape ``(n, 2)`` with rows
         ``[u_i, w_i]`` sorted lexicographically by ``u`` then ``w``.
         Cluster-merging operates in 2-D Euclidean distance, so two
@@ -651,13 +987,20 @@ def eliminate_uw_pairs(
     """
     if not drop_indices:
         raise ValueError("drop_indices must be non-empty")
-    from ssik._pencil import newton_refine_system
+    accept_tol = accept_residue_tol if accept_residue_tol is not None else residue_tol
+
+    # Hoist the drop-independent ``T_w`` precompute out of the per-drop
+    # loop. ``_apply_sigma_e_to_tw_pre`` only depends on ``sigma_E`` and
+    # the per-arm ``T_w_pre``, not on ``drop_idx``; calling
+    # ``compute_fg_numeric`` per drop was redoing it 3x.
+    sigma_E_arr = np.asarray(sigma_E, dtype=np.float64)
+    T_w = _apply_sigma_e_to_tw_pre(pre.T_w_pre, sigma_E_arr)
 
     refined: list[tuple[float, float]] = []
     last_error: Exception | None = None
     for di in drop_indices:
         try:
-            f, g = compute_fg_numeric(pre, sigma_E, drop_idx=di)
+            f, g = _compute_fg_with_tw(pre.T_u, T_w, di)
         except np.linalg.LinAlgError as e:
             last_error = e
             continue
@@ -668,21 +1011,15 @@ def eliminate_uw_pairs(
             continue
         if cands.size == 0:
             continue
-        residual_fn, jacobian_fn, scale_fn = _build_fg_closures(f, g)
         for u0 in cands:
             w0 = _initial_w_for(f, g, float(u0))
             if w0 is None:
                 continue
-            x_ref, residue = newton_refine_system(
-                residual_fn,
-                jacobian_fn,
-                np.asarray([float(u0), w0], dtype=np.float64),
-                natural_scale_fn=scale_fn,
-                max_iter=_NEWTON_MAX_ITER,
-                tol=residue_tol,
+            u_ref, w_ref, residue = _refine_uw_inline(
+                f, g, float(u0), float(w0), _NEWTON_MAX_ITER, residue_tol
             )
-            if residue < residue_tol:
-                refined.append((float(x_ref[0]), float(x_ref[1])))
+            if residue < accept_tol:
+                refined.append((u_ref, w_ref))
     if not refined and last_error is not None:
         raise last_error
     if not refined:
@@ -740,9 +1077,7 @@ def eliminate_uw_numeric(
 
     :returns: sorted 1-D array of real candidate ``u = v_1`` values.
     """
-    pairs = eliminate_uw_pairs(
-        pre, sigma_E, drop_indices=drop_indices, residue_tol=residue_tol
-    )
+    pairs = eliminate_uw_pairs(pre, sigma_E, drop_indices=drop_indices, residue_tol=residue_tol)
     if pairs.size == 0:
         return np.asarray([], dtype=np.float64)
     # Project to u only; re-cluster in 1-D since two pairs at the same u

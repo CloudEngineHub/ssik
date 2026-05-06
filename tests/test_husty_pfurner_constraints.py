@@ -24,13 +24,21 @@ import math
 
 import numpy as np
 import pytest
+import sympy as sp
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from ssik.solvers.husty_pfurner._constraints import (
+    _V2_SYM,
+    TV2_RRR_CASE_KEYS,
     hyperplane_residuals,
     tv1_hyperplanes_rrr,
+    tv2_hyperplanes_rrr,
+    tv2_rrr_case_for,
+    tv2_symbolic_in_v2,
     tv3_hyperplanes_rrr,
+    tv4_hyperplanes_rrr,
+    tv4_symbolic_in_v4,
     tv6_hyperplanes_rrr,
     v1_hyperplanes_rrr,
 )
@@ -1248,3 +1256,496 @@ def test_tv6_rejects_wrong_shape_sigma_e() -> None:
             sigma_E=np.zeros(7),  # wrong shape
             v_6=0.0,
         )
+
+
+# ============================================================================
+# T(v_4) -- Phase 5c.4b / GitHub #177 -- inner-mirror right-chain parametrization.
+# ============================================================================
+#
+# Mirror of T(v_3) onto the right chain via Capco eq. (6) substitutions, with
+# the parametric variable v_3 -> -v_4. Used when T(v_6) is structurally
+# degenerate (a_4 = 0 OR l_4 = 0). Same precondition as T(v_6): a_5 != 0 AND
+# l_5 != 0.
+#
+# Bulletproof property: for ANY q_star and DH with a_5, l_5 != 0, the T(v_4)
+# hyperplanes vanish on the LEFT chain DQ tau when sigma_E is the full 6R
+# FK pose -- exactly mirroring the T(v_6) bulletproof property.
+
+
+def test_tv4_shape() -> None:
+    """tv4_hyperplanes_rrr returns the 4x8 hyperplane coefficient matrix."""
+    sigma_E = np.array([1.0, 0.1, 0.2, 0.3, 0.0, 0.5, 0.4, 0.3])
+    coeffs = tv4_hyperplanes_rrr(
+        a_4=0.5,
+        l_4=0.4,
+        d_4=0.1,
+        a_5=0.6,
+        l_5=0.3,
+        d_5=0.2,
+        sigma_E=sigma_E,
+        v_4=0.7,
+    )
+    assert coeffs.shape == (4, 8)
+    assert coeffs.dtype == np.float64
+    assert np.all(np.isfinite(coeffs))
+
+
+def test_tv4_rejects_wrong_shape_sigma_e() -> None:
+    """sigma_E must be 8-vec; otherwise raise ValueError."""
+    with pytest.raises(ValueError, match="sigma_E must be 8-vec"):
+        tv4_hyperplanes_rrr(
+            a_4=0.5,
+            l_4=0.4,
+            d_4=0.1,
+            a_5=0.6,
+            l_5=0.3,
+            d_5=0.2,
+            sigma_E=np.zeros(7),
+            v_4=0.0,
+        )
+
+
+def test_tv4_symbolic_matches_numeric() -> None:
+    """tv4_symbolic_in_v4 with v_4 substituted matches tv4_hyperplanes_rrr."""
+    import sympy as sp
+
+    from ssik.solvers.husty_pfurner._constraints import _V4_SYM
+
+    sigma_E = np.array([1.0, 0.1, 0.2, 0.3, 0.0, 0.5, 0.4, 0.3])
+    H_num = tv4_hyperplanes_rrr(
+        a_4=0.5,
+        l_4=0.4,
+        d_4=0.1,
+        a_5=0.6,
+        l_5=0.3,
+        d_5=0.2,
+        sigma_E=sigma_E,
+        v_4=0.7,
+    )
+    H_sym = tv4_symbolic_in_v4(
+        a_4=0.5,
+        l_4=0.4,
+        d_4=0.1,
+        a_5=0.6,
+        l_5=0.3,
+        d_5=0.2,
+        sigma_E=sigma_E,
+    )
+    H_sym_at = np.asarray(H_sym.subs(_V4_SYM, sp.Float(0.7)).tolist(), dtype=np.float64)
+    assert np.max(np.abs(H_sym_at - H_num)) < 1e-12
+
+
+@pytest.mark.parametrize("seed", list(range(10)))
+def test_tv4_hyperplanes_vanish_on_left_chain_dq(seed: int) -> None:
+    """T(v_4) hyperplanes vanish on the LEFT chain DQ when sigma_E is the
+    full 6R FK pose.
+
+    Setup: pick random (DH, q_star). Compute sigma_E = full 6R FK DQ.
+    The LEFT-chain DQ tau = sigma_1 sigma_2 sigma_3 belongs to V_L AND
+    to V_R = sigma_E sigma_6^{-1} sigma_5^{-1} sigma_4^{-1}. T(v_4) is
+    a parametrisation of V_R (with v_4 free), so its hyperplanes must
+    vanish on tau when v_4 = q_star[3]. Mirrors test_tv6_*.
+    """
+    rng = np.random.default_rng(seed + 500)
+    a_1 = float(rng.uniform(0.1, 1.5)) * float(rng.choice([-1.0, 1.0]))
+    l_1 = math.tan(0.5 * float(rng.uniform(0.1, math.pi - 0.1)))
+    d_2 = float(rng.uniform(-1.0, 1.0))
+    a_2 = float(rng.uniform(0.1, 1.5)) * float(rng.choice([-1.0, 1.0]))
+    l_2 = math.tan(0.5 * float(rng.uniform(0.1, math.pi - 0.1)))
+    d_3 = float(rng.uniform(-1.0, 1.0))
+    a_3 = float(rng.uniform(0.1, 1.5)) * float(rng.choice([-1.0, 1.0]))
+    l_3 = math.tan(0.5 * float(rng.uniform(0.1, math.pi - 0.1)))
+    d_4 = float(rng.uniform(-1.0, 1.0))
+    a_4 = float(rng.uniform(0.1, 1.5)) * float(rng.choice([-1.0, 1.0]))
+    l_4 = math.tan(0.5 * float(rng.uniform(0.1, math.pi - 0.1)))
+    d_5 = float(rng.uniform(-1.0, 1.0))
+    a_5 = float(rng.uniform(0.1, 1.5)) * float(rng.choice([-1.0, 1.0]))
+    l_5 = math.tan(0.5 * float(rng.uniform(0.1, math.pi - 0.1)))
+
+    v_1 = float(rng.uniform(-2.0, 2.0))
+    v_2 = float(rng.uniform(-2.0, 2.0))
+    v_3 = float(rng.uniform(-2.0, 2.0))
+    v_4 = float(rng.uniform(-2.0, 2.0))
+    v_5 = float(rng.uniform(-2.0, 2.0))
+    v_6 = float(rng.uniform(-2.0, 2.0))
+
+    sigma_E = _full_6r_chain_dq(
+        v_1,
+        a_1,
+        l_1,
+        d_2,
+        v_2,
+        a_2,
+        l_2,
+        v_3,
+        d_3,
+        a_3,
+        l_3,
+        v_4,
+        d_4,
+        a_4,
+        l_4,
+        v_5,
+        d_5,
+        a_5,
+        l_5,
+        v_6,
+    )
+    tau = _vl_chain_rrr(v_1, a_1, l_1, d_2, v_2, a_2, l_2, v_3, d_3, a_3, l_3)
+
+    coeffs = tv4_hyperplanes_rrr(a_4, l_4, d_4, a_5, l_5, d_5, sigma_E, v_4)
+    residuals = hyperplane_residuals(coeffs, tau)
+    sigma_norm = float(np.linalg.norm(tau))
+    row_norms = np.linalg.norm(coeffs, axis=1)
+    expected_scales = np.maximum(row_norms * sigma_norm, 1e-12)
+    relative = np.abs(residuals) / expected_scales
+    assert np.all(relative < 1e-10), (
+        f"seed={seed}: max relative residual={float(np.max(relative)):.2e}"
+    )
+
+
+@pytest.mark.parametrize("v_5", [-1.0, 0.0, 0.7, 1.5])
+@pytest.mark.parametrize("v_6", [-1.0, 0.0, 0.7, 1.5])
+def test_tv4_invariant_under_v5_v6_changes(v_5: float, v_6: float) -> None:
+    """Fix DH and v_4; vary v_5, v_6 across V_R's other free parameters.
+    T(v_4) coefficients are independent of (v_5, v_6) by construction;
+    every V_L pose at the corresponding sigma_E must satisfy them.
+    """
+    a_1, l_1, d_2 = 0.5, 0.4, 0.1
+    a_2, l_2 = 0.6, 0.3
+    d_3, a_3, l_3 = 0.2, 0.4, 0.5
+    d_4, a_4, l_4 = 0.15, 0.45, 0.55
+    d_5, a_5, l_5 = 0.18, 0.5, 0.45
+    v_1, v_2, v_3, v_4 = 0.3, -0.4, 0.5, 0.7
+
+    sigma_E = _full_6r_chain_dq(
+        v_1,
+        a_1,
+        l_1,
+        d_2,
+        v_2,
+        a_2,
+        l_2,
+        v_3,
+        d_3,
+        a_3,
+        l_3,
+        v_4,
+        d_4,
+        a_4,
+        l_4,
+        v_5,
+        d_5,
+        a_5,
+        l_5,
+        v_6,
+    )
+    tau = _vl_chain_rrr(v_1, a_1, l_1, d_2, v_2, a_2, l_2, v_3, d_3, a_3, l_3)
+    coeffs = tv4_hyperplanes_rrr(a_4, l_4, d_4, a_5, l_5, d_5, sigma_E, v_4)
+    residuals = hyperplane_residuals(coeffs, tau)
+    sigma_norm = float(np.linalg.norm(tau))
+    row_norms = np.linalg.norm(coeffs, axis=1)
+    expected_scales = np.maximum(row_norms * sigma_norm, 1e-12)
+    relative = np.abs(residuals) / expected_scales
+    assert np.all(relative < 1e-10), (
+        f"v_5={v_5}, v_6={v_6}: max relative={float(np.max(relative)):.2e}"
+    )
+
+
+@given(
+    a_1=_safe_dh,
+    s_a1=_sign,
+    alpha_1=_safe_alpha,
+    d_2=_safe_dist,
+    a_2=_safe_dh,
+    s_a2=_sign,
+    alpha_2=_safe_alpha,
+    d_3=_safe_dist,
+    a_3=_safe_dh,
+    s_a3=_sign,
+    alpha_3=_safe_alpha,
+    d_4=_safe_dist,
+    a_4=_safe_dh,
+    s_a4=_sign,
+    alpha_4=_safe_alpha,
+    d_5=_safe_dist,
+    a_5=_safe_dh,
+    s_a5=_sign,
+    alpha_5=_safe_alpha,
+    v_1=_safe_dist,
+    v_2=_safe_dist,
+    v_3=_safe_dist,
+    v_4=_safe_dist,
+    v_5=_safe_dist,
+    v_6=_safe_dist,
+)
+@settings(
+    max_examples=500,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_tv4_hypothesis_fuzz_500_examples(
+    a_1,
+    s_a1,
+    alpha_1,
+    d_2,
+    a_2,
+    s_a2,
+    alpha_2,
+    d_3,
+    a_3,
+    s_a3,
+    alpha_3,
+    d_4,
+    a_4,
+    s_a4,
+    alpha_4,
+    d_5,
+    a_5,
+    s_a5,
+    alpha_5,
+    v_1,
+    v_2,
+    v_3,
+    v_4,
+    v_5,
+    v_6,
+):
+    """500-pose fuzz for T(v_4) vanishing property."""
+    a_1s, a_2s, a_3s, a_4s, a_5s = (
+        s_a1 * a_1,
+        s_a2 * a_2,
+        s_a3 * a_3,
+        s_a4 * a_4,
+        s_a5 * a_5,
+    )
+    l_1, l_2, l_3, l_4, l_5 = (
+        math.tan(0.5 * x) for x in (alpha_1, alpha_2, alpha_3, alpha_4, alpha_5)
+    )
+    sigma_E = _full_6r_chain_dq(
+        v_1,
+        a_1s,
+        l_1,
+        d_2,
+        v_2,
+        a_2s,
+        l_2,
+        v_3,
+        d_3,
+        a_3s,
+        l_3,
+        v_4,
+        d_4,
+        a_4s,
+        l_4,
+        v_5,
+        d_5,
+        a_5s,
+        l_5,
+        v_6,
+    )
+    tau = _vl_chain_rrr(v_1, a_1s, l_1, d_2, v_2, a_2s, l_2, v_3, d_3, a_3s, l_3)
+    coeffs = tv4_hyperplanes_rrr(a_4s, l_4, d_4, a_5s, l_5, d_5, sigma_E, v_4)
+    residuals = hyperplane_residuals(coeffs, tau)
+    sigma_norm = float(np.linalg.norm(tau))
+    row_norms = np.linalg.norm(coeffs, axis=1)
+    expected_scales = np.maximum(row_norms * sigma_norm, 1e-12)
+    relative = np.abs(residuals) / expected_scales
+    assert np.all(relative < 1e-9), f"max relative residual={float(np.max(relative)):.2e}"
+
+
+def test_tv4_handles_a4_zero() -> None:
+    """T(v_4) is well-defined when a_4 = 0 (its motivating use case).
+    Mirrors `test_tv1_a2_zero_produces_finite_coefficients` but for the
+    right-chain inner-mirror.
+    """
+    sigma_E = np.array([1.0, 0.1, 0.2, 0.3, 0.0, 0.5, 0.4, 0.3])
+    coeffs = tv4_hyperplanes_rrr(
+        a_4=0.0,
+        l_4=0.5,
+        d_4=0.1,
+        a_5=0.6,
+        l_5=0.4,
+        d_5=0.2,
+        sigma_E=sigma_E,
+        v_4=0.5,
+    )
+    assert coeffs.shape == (4, 8)
+    assert np.all(np.isfinite(coeffs))
+    assert np.linalg.norm(coeffs) > 1e-3, "coefficients must be non-trivial"
+
+
+def test_tv4_handles_l4_zero() -> None:
+    """T(v_4) is well-defined when l_4 = 0 (alpha_4 = 0)."""
+    sigma_E = np.array([1.0, 0.1, 0.2, 0.3, 0.0, 0.5, 0.4, 0.3])
+    coeffs = tv4_hyperplanes_rrr(
+        a_4=0.3,
+        l_4=0.0,
+        d_4=0.1,
+        a_5=0.6,
+        l_5=0.4,
+        d_5=0.2,
+        sigma_E=sigma_E,
+        v_4=0.5,
+    )
+    assert coeffs.shape == (4, 8)
+    assert np.all(np.isfinite(coeffs))
+    assert np.linalg.norm(coeffs) > 1e-3
+
+
+# ----------------------------------------------------------------------------
+# T(v_2) -- Phase 5c.4 / GitHub #176 -- the double-degenerate parametrization.
+# Triggered for RRR when both T(v_1) (a_2!=0 AND l_2!=0) and T(v_3) (a_1!=0
+# AND l_1!=0) are violated. Capco enumerates 4 sub-cases keyed by which DH
+# parameter pair is zero -- each builds a different 4-hyperplane system
+# from the 12x16 kernel construction.
+# ----------------------------------------------------------------------------
+
+
+def _vl_chain_rrr_simple(
+    v_1: float,
+    a_1: float,
+    l_1: float,
+    v_2: float,
+    d_2: float,
+    a_2: float,
+    l_2: float,
+    v_3: float,
+) -> np.ndarray:
+    """RRR left-chain DQ in the SIMPLE form ``T(v_2)`` derives against:
+    sigma_1(v_1, d_1=0, a_1, l_1) . sigma_2(v_2, d_2, a_2, l_2) . R_z(v_3).
+
+    Differs from :func:`_vl_chain_rrr` in that joint-3 DH parameters
+    (a_3, l_3, d_3) are absent -- they get absorbed by the Tv2_full
+    change of variables in ``_eliminate.py``.
+    """
+    sigma_1 = dq_mul(_rz_dq(v_1), dq_mul(_tx_dq(a_1), _rx_dq(l_1)))
+    sigma_2 = dq_mul(
+        _rz_dq(v_2),
+        dq_mul(_tz_dq(d_2), dq_mul(_tx_dq(a_2), _rx_dq(l_2))),
+    )
+    return dq_mul(sigma_1, dq_mul(sigma_2, _rz_dq(v_3)))
+
+
+_TV2_RRR_CASE_DH = {
+    "[a_1=0,a_2=0]": dict(a_1=0.0, a_2=0.0),
+    "[a_1=0,l_2=0]": dict(a_1=0.0, l_2=0.0),
+    "[l_1=0,a_2=0]": dict(l_1=0.0, a_2=0.0),
+    "[l_1=0,l_2=0]": dict(l_1=0.0, l_2=0.0),
+}
+
+
+def _random_dh_for_tv2_case(rng: np.random.Generator, case_key: str) -> dict[str, float]:
+    """Random non-degenerate DH satisfying the sub-case condition.
+    The DH params NOT pinned to zero by the sub-case are drawn from a
+    safe non-degenerate range.
+    """
+    fixed = _TV2_RRR_CASE_DH[case_key]
+    out = {
+        "a_1": float(rng.uniform(0.2, 1.0)) * float(rng.choice([-1.0, 1.0])),
+        "l_1": math.tan(0.5 * float(rng.uniform(0.3, math.pi - 0.3))),
+        "d_2": float(rng.uniform(-1.0, 1.0)),
+        "a_2": float(rng.uniform(0.2, 1.0)) * float(rng.choice([-1.0, 1.0])),
+        "l_2": math.tan(0.5 * float(rng.uniform(0.3, math.pi - 0.3))),
+    }
+    out.update(fixed)
+    return out
+
+
+@pytest.mark.parametrize("case_key", TV2_RRR_CASE_KEYS)
+@pytest.mark.parametrize("seed", list(range(5)))
+def test_tv2_hyperplanes_vanish_on_full_vl_chain(case_key: str, seed: int) -> None:
+    """T(v_2) hyperplanes vanish on the full RRR left-chain DQ (in the
+    simple form -- joint-3 DH absent) for random (v_1, v_2, v_3) and
+    random DH satisfying the sub-case degeneracy condition.
+
+    Tolerance 1e-12 (post-numeric-SVD-kernel construction; tighter than
+    T(v_1)/T(v_3) which use sympy lambdify and lose ~3 digits to numpy
+    contraction order).
+    """
+    rng = np.random.default_rng(seed * 100 + (hash(case_key) % 1000))
+    dh = _random_dh_for_tv2_case(rng, case_key)
+    v_1 = float(rng.uniform(-2.0, 2.0))
+    v_2 = float(rng.uniform(-2.0, 2.0))
+    v_3 = float(rng.uniform(-2.0, 2.0))
+
+    sigma_vl = _vl_chain_rrr_simple(
+        v_1, dh["a_1"], dh["l_1"], v_2, dh["d_2"], dh["a_2"], dh["l_2"], v_3
+    )
+
+    h_sym = tv2_symbolic_in_v2(case_key, **dh)
+    h_at_v2 = h_sym.subs(_V2_SYM, sp.Float(v_2))
+    h_np = np.array(h_at_v2.tolist(), dtype=np.float64)
+
+    residuals = h_np @ sigma_vl
+    assert np.allclose(residuals, 0.0, atol=1e-12), (
+        f"case={case_key} seed={seed}: max|residual|={float(np.max(np.abs(residuals))):.2e}"
+    )
+
+
+def test_tv2_rrr_case_for_picks_correct_subcase() -> None:
+    """``tv2_rrr_case_for`` mirrors Capco's which_case.py dispatch."""
+    assert tv2_rrr_case_for(0.0, 1.0, 0.0, 1.0) == "[a_1=0,a_2=0]"
+    assert tv2_rrr_case_for(0.0, 1.0, 0.5, 0.0) == "[a_1=0,l_2=0]"
+    assert tv2_rrr_case_for(0.5, 0.0, 0.0, 1.0) == "[l_1=0,a_2=0]"
+    assert tv2_rrr_case_for(0.5, 0.0, 0.5, 0.0) == "[l_1=0,l_2=0]"
+    with pytest.raises(ValueError, match=r"do not match any T\(v_2\) RRR sub-case"):
+        # Non-degenerate DH: T(v_1) applies, no T(v_2) sub-case.
+        tv2_rrr_case_for(0.5, 1.0, 0.5, 1.0)
+
+
+@pytest.mark.parametrize("case_key", TV2_RRR_CASE_KEYS)
+@pytest.mark.parametrize("seed", list(range(5)))
+def test_tv2_full_hyperplanes_vanish_on_full_vl_chain(case_key: str, seed: int) -> None:
+    """Tv2_full hyperplanes (with joint-3 DH change of variables) vanish
+    on the FULL RRR left-chain DQ ``sigma_1 sigma_2 sigma_3`` (now
+    including joint-3 DH offsets ``a_3, l_3, d_3``) for random
+    (v_1, v_2, v_3) and random DH satisfying the sub-case condition.
+
+    This is the form ``_eliminate.precompute_rrr_chain`` consumes -- the
+    Study coords are at frame F_4, after joint 3's full transition has
+    acted.
+
+    Tolerance 1e-12 (post-numeric-SVD-kernel construction).
+    """
+    rng = np.random.default_rng(seed * 100 + (hash(case_key) % 1000) + 17)
+    dh = _random_dh_for_tv2_case(rng, case_key)
+    # Joint-3 DH parameters (free, not part of the sub-case).
+    d_3 = float(rng.uniform(-1.0, 1.0))
+    a_3 = float(rng.uniform(0.2, 1.0)) * float(rng.choice([-1.0, 1.0]))
+    l_3 = math.tan(0.5 * float(rng.uniform(0.3, math.pi - 0.3)))
+    v_1 = float(rng.uniform(-2.0, 2.0))
+    v_2 = float(rng.uniform(-2.0, 2.0))
+    v_3 = float(rng.uniform(-2.0, 2.0))
+
+    # Full RRR chain INCLUDING joint-3 DH offsets.
+    sigma_vl_full = _vl_chain_rrr(
+        v_1,
+        dh["a_1"],
+        dh["l_1"],
+        dh["d_2"],
+        v_2,
+        dh["a_2"],
+        dh["l_2"],
+        v_3,
+        d_3,
+        a_3,
+        l_3,
+    )
+
+    coeffs_full = tv2_hyperplanes_rrr(
+        case_key,
+        a_1=dh["a_1"],
+        l_1=dh["l_1"],
+        d_2=dh["d_2"],
+        a_2=dh["a_2"],
+        l_2=dh["l_2"],
+        d_3=d_3,
+        a_3=a_3,
+        l_3=l_3,
+        v_2=v_2,
+    )
+    residuals = coeffs_full @ sigma_vl_full
+    assert np.allclose(residuals, 0.0, atol=1e-12), (
+        f"case={case_key} seed={seed}: max|residual|={float(np.max(np.abs(residuals))):.2e}"
+    )
