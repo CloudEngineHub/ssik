@@ -103,6 +103,21 @@ def _emit_iiwa14() -> str:
     return result.source
 
 
+def _emit_xarm7() -> str:
+    from xarm7 import xarm7_specs
+
+    kb = build_kinbody(xarm7_specs(), base_link_name="link_base", ee_link_name="link7")
+    plan = dispatch(kb)
+    result = emit_artifact(
+        kb=kb,
+        plan=plan,
+        module_name="xarm7_ik",
+        output_path=None,
+        arm_label="UFactory xArm7",
+    )
+    return result.source
+
+
 @pytest.mark.parametrize(
     ("module_name", "emit_fn"),
     [
@@ -123,6 +138,7 @@ def _emit_iiwa14() -> str:
         ("jaco2_ik", _emit_jaco2),
         ("franka_panda_ik", _emit_franka_panda),
         ("iiwa14_ik", _emit_iiwa14),
+        ("xarm7_ik", _emit_xarm7),
         (
             "gen3_ik",
             lambda: _emit_urdf(
@@ -169,6 +185,20 @@ def test_committed_artifact_matches_regeneration(module_name: str, emit_fn: obje
             "_solver_solve",
             'SOLVER_NAME = "seven_r.srs_polished"',
             "def fk(q):",
+        ],
+        # xArm7: same class of drift as gen3 -- the xarm7 fixture's
+        # quaternion-to-rotation conversion (np.sqrt + division) produces
+        # last-bit-different float64 values on macOS Accelerate vs Linux
+        # OpenBLAS, which propagates through poe-normalisation into the
+        # baked T_HOME / T_left arrays. Functionally equivalent (FK
+        # round-trips at 1e-13 on both platforms); only the float repr
+        # differs by one trailing digit.
+        "xarm7_ik": [
+            'SOLVER_NAME = "jointlock.seven_r"',
+            'BASE_LINK = "link_base"',
+            'EE_LINK = "link7"',
+            "DOF = 7",
+            "def solve(",
         ],
     }
     if module_name in _PLATFORM_DRIFT_ARTIFACTS and sys.platform != "darwin":
