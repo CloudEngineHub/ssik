@@ -5,6 +5,7 @@ Draft copy + recipes for v1.1 adoption push. Nothing here is part of the publish
 ## Contents
 
 - `zenodo-setup.md` — one-time GitHub-Zenodo integration. ~10 minutes; requires Siddhartha's Zenodo + GitHub login.
+- `x-thread.md` — draft thread for X / Twitter (personal account).
 - `reddit-robotics.md` — draft post for `r/robotics`.
 - `ros-discourse.md` — draft post for `https://discourse.ros.org` (Category: General).
 - `robotics-worldwide.md` — draft post for the `robotics-worldwide@usc.edu` mailing list.

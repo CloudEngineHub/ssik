@@ -46,7 +46,7 @@ sols = ur5_ik.solve(T_target, max_solutions=1, q_seed=q_current)
 q_command = sols[0].q if sols else q_current
 ```
 
-This branch-closest-to-current pattern is, in my experience, where ssik earns its keep most clearly: **teleoperation and demonstration-collection pipelines** where jump-free joint trajectories at controller rate matter more than any single-shot accuracy number. Analytical IK gives you deterministic, continuous output — no seed-dependent jumps, no convergence stalls mid-demo — which is exactly the property that imitation-learning, behaviour-cloning, and VLA training pipelines need from their data-collection rigs. If you are building one of those rigs, I would love to hear what you need.
+This branch-closest-to-current pattern is, in my experience, where ssik earns its keep most clearly: **teleoperation and demonstration-collection pipelines** where jump-free joint trajectories at controller rate matter more than any single-shot accuracy number. Analytical IK gives you deterministic, continuous output (no seed-dependent jumps, no convergence stalls mid-demo) which is exactly the property that training pipelines need from their data-collection rigs. If you are building one of those rigs, I would love to hear what you need.
 
 When a pose returns no solutions, `solve(T, explain=True)` reports *why* — which dispatch tier was used, which subproblem failed, and the residuals along the way. This was added to make debugging unreachable targets much less mysterious; teaching contexts especially seem to find it useful.
 

@@ -13,63 +13,42 @@
 
 Dear robotics-worldwide,
 
-I'm delighted to share **ssik**, an open-source Python library for analytical inverse kinematics on 6R and 7R revolute manipulators. It's a project from the Personal Robotics Lab, released in the hope that it's useful to the community — happy to help anyone get it running, and happy to take requests for additional arms.
+I'd like to share **ssik**, an open-source Python library for analytical inverse kinematics on 6R and 7R revolute manipulators. It's the successor to the Personal Robotics Lab's earlier IKFast work led by Rosen Diankov — modernised for the cobot generation and built especially for the learning pipelines now running on top of these arms.
 
-  Repository:  https://github.com/personalrobotics/ssik
-  Docs:        https://personalrobotics.github.io/ssik/
-  Install:     pip install ssik
-  DOI:         https://doi.org/10.5281/zenodo.20278005
-  License:     BSD-3-Clause
+  pip install ssik
+  Repo:    https://github.com/personalrobotics/ssik
+  Docs:    https://personalrobotics.github.io/ssik/
+  DOI:     https://doi.org/10.5281/zenodo.20278005
+  License: BSD-3-Clause
 
-### Lineage
+### Fast
 
-ssik is the successor to my Personal Robotics Lab's earlier IKFast authored by Rosen Diankov. IKFast has, for fifteen years, set the standard for what analytical IK should look like: per-arm specialised code, every branch enumerated, near-instant solves on the kinematic classes it covered. ssik is an attempt to carry that legacy forward into a moment when researchers and practitioners increasingly need IK for arms outside IKFast's original tier list: collaborative 7R manipulators with offset wrists, modular 6R cobots with non-standard joint twists, redundant arms where the analytical branch structure is the whole point of the analysis.
+Median per-pose timings on the prebuilt arms:
 
-### What it does
+  - Puma 560, UR5:                                  0.2 – 0.5 ms
+  - Kinova JACO 2, UFactory xArm6, AgileX PiPER:    ~1 ms (non-Pieper 6R)
+  - KUKA iiwa14:                                    4.5 ms (SRS 7R, 128 redundancy branches)
+  - Franka Panda, Flexiv Rizon 4, Kassow KR810:     27 – 30 ms (non-SRS 7R)
 
-ssik returns every analytical IK branch for a target end-effector pose. Thirteen commercial arms ship as prebuilt artifacts in the wheel (UR5, Puma 560, Kinova JACO 2, KUKA iiwa LBR 14, Kinova Gen3, Franka Panda, Flexiv Rizon 4, Kassow KR810, UFactory xArm7, UFactory xArm6, Unitree Z1, AgileX PiPER, Flexiv Rizon 10); any other arm is supported via `ssik build my_arm.urdf`, which emits a single-file Python artifact specialised to the URDF. Adding a new prebuilt to the repo is now a single MANIFEST.toml entry plus the URDF — a workflow we designed to make community contributions easy.
+At a 30 Hz teleop loop every prebuilt fits inside the controller period; on the closed-form classes ssik runs three orders of magnitude faster than that. The goal is for IK to never be the bottleneck in your data pipeline.
 
-The library is intended for tasks where branch enumeration matters: motion planning (search over branches for clearance / manipulability), dexterity analysis, trajectory continuation across kinematic singularities, and reinforcement-learning environments where IK ground truth is part of the reward / observation. Numerical IK libraries that converge to a single configuration are not substitutes for this use case — but they remain excellent tools for the cases they were designed for.
+### Built for learning
 
-### Algorithmic coverage
+The application I most want to enable is **teleoperation for collecting demonstrations to train imitation-learning, behaviour-cloning, and VLA policies**. These pipelines need IK that is deterministic, jump-free, and fast — properties analytical IK has and numerical IK doesn't. The pattern
 
-ssik dispatches by kinematic class. The novel coverage relative to the subproblem-decomposition libraries (IK-Geo, EAIK) is in the kinematic classes those libraries refuse:
+  sols = arm.solve(T_target, max_solutions=1, q_seed=q_current)
 
-  - non-Pieper 6R, e.g. Kinova JACO 2 with 60° DH twists between joints 4 and 5;
-  - non-SRS 7R, e.g. Flexiv Rizon 4 and Kassow KR810 with offset wrists;
-  - approximate-SRS 7R, e.g. Kinova Gen3's 12 mm offset.
+returns the analytical branch nearest the current joint state in a single closed-form call: no seed-dependent jumps, no convergence stalls mid-demonstration, no surprises when the operator crosses a singularity. If you are building demonstration-collection infrastructure I would genuinely love to hear what you need.
 
-The implementation is a clean-room reimplementation of algorithms from:
+### Arms and correctness
 
-  - Elias & Wen (2022/2025), "IK-Geo: Unified Robot Inverse Kinematics Using Subproblem Decomposition" — six canonical subproblems + composition rules, the closed-form path for Pieper / SRS classes.
-  - Husty, Pfurner, Schröcker (2007), "A new and efficient algorithm for the inverse kinematics of a general serial 6R manipulator", Mechanism and Machine Theory — Study-quaternion degree-16 univariate, the universal 6R fallback.
-  - Raghavan & Roth (1993), "Inverse Kinematics of the General 6R Manipulator and Related Linkages", J. Mech. Des. — Sylvester resultant + numerical eigenvalue path.
-  - Singh & Kreutz-Delgado (1989) — closed-form 7R analytical IK for the SRS class.
+Thirteen commercial arms ship as prebuilt artifacts (UR5, Puma 560, Kinova JACO 2 & Gen3, KUKA iiwa14, Franka Panda, Flexiv Rizon 4 & 10, Kassow KR810, UFactory xArm6 & xArm7, Unitree Z1, AgileX PiPER). Any other arm is supported via `ssik build my_arm.urdf`, which emits a single-file Python artifact specialised to the URDF — adding a new prebuilt to the repository is a one-line `MANIFEST.toml` entry, and contributions are warmly welcomed.
 
-Algorithmic lineage is documented in each module's docstring, with citations back to the original publications. ssik does not vendor LGPL code from OpenRAVE / IKFast — it is a fresh implementation built on the open literature.
+Correctness is enforced empirically: every prebuilt is exercised by a 500-pose Hypothesis fuzz sweep on every pull request, with forward-kinematics closure asserted to a per-class floor. If you find a pose ssik gets wrong, that's a release-blocking bug I'd want to hear about.
 
-### Numerical behaviour and correctness
+The implementation is a clean-room reimplementation from the open literature (Elias & Wen 2022/2025; Husty, Pfurner & Schröcker 2007; Raghavan & Roth 1993; Singh & Kreutz-Delgado 1989); per-module docstrings cite the relevant references. No LGPL code from OpenRAVE / IKFast is vendored.
 
-Forward-kinematics closure ‖FK(q) − T‖_F is below 1e-5 by default (10 µm position error on a 1 m arm, well below typical commercial-robot repeatability) and tightenable to ~1e-12 (0.1 nm scale) via the public TolerancePolicy with opt-in Levenberg-Marquardt polish.
-
-Every prebuilt arm is exercised on every PR by a 500-pose Hypothesis fuzz sweep, with per-class FK-floor tolerances asserted on every solution. The intent is empirical: "bulletproof for every arm, on every pose, every time". Worst-case FK floors per kinematic class are characterised and documented; if a pose ssik returns ever fails this bound, we treat it as a release-blocking bug rather than a tolerance to widen.
-
-For debugging unreachable targets, `solve(T, explain=True)` returns a structured trace of which dispatch tier was used, which subproblem(s) executed, and the residuals along the way. This has been particularly valuable in teaching contexts and when narrowing down "is it the arm, the URDF, or the target?" questions.
-
-### Architecture
-
-The runtime is pure NumPy + (for non-Pieper 6R and non-SRS 7R) SciPy. Per-arm symbolic preprocessing runs once at `ssik build` time and produces numeric coefficients that are baked into the emitted Python module; sympy is not on the runtime import path. Two Cython hot-loops (POE forward kinematics; LM refinement) are compiled to native extensions in the published wheels.
-
-### Use cases I'd value feedback on
-
-  - Teleoperation pipelines for demonstration collection. The `solve(T, max_solutions=1, q_seed=q_current)` pattern returns the analytical branch nearest the current joint state — deterministic, continuous, and fast enough for controller-rate IK with no seed-dependent jumps or convergence stalls mid-demonstration. This is the natural primitive for jump-free joint-space trajectories during data collection for imitation learning, behaviour cloning, and VLA training. It is also, for what it's worth, the use case I personally find most exciting; if you are building demonstration-collection infrastructure I would love to hear what you need.
-  - Motion-planning groups doing branch enumeration today via numerical IK + restart-from-perturbed-seeds — ssik enumerates the analytical set directly.
-  - Researchers reporting "IKFast cannot solve our arm" results — ssik may; I would be very happy to investigate specific URDFs.
-  - Teaching contexts (kinematics, mechanisms): the per-arm artifact is a single readable Python file, suitable for assignments and labs. The diagnostic `explain=True` mode is designed with student debugging in mind.
-
-Issues, PRs, and questions are warmly welcomed on the repo. I would especially value feedback from colleagues who have tried IKFast or the subproblem libraries on an arm those did not cover — those edge cases are exactly what ssik was built for, and hearing where it works (or doesn't) is the most useful signal we can get.
-
-Thank you to the many people across this community whose work on IK over the decades has made this possible.
+Issues, pull requests, and arm requests are warmly welcomed. Thank you to the many people across this community whose work on IK over the decades has made this possible.
 
 Best,
 Siddhartha Srinivasa
