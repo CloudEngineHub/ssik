@@ -454,3 +454,112 @@ def test_is_srs_7r_rejects_non_7r() -> None:
 
     kb = _load_fixture_kb("ur5")  # 6R
     assert is_srs_7r(kb) is None
+
+
+def test_is_srs_7r_rejects_non_zyz_wrist() -> None:
+    """Geometrically-SRS chains with non-Z*Z wrist (first/third wrist axes
+    NOT parallel) must be rejected by the strict predicate -- the Singh-
+    Kreutz solver's ZYZ Euler decomposition silently produces wrong
+    q-vectors on these chains (#307; first surfaced on Enactic OpenArm v2.0).
+
+    The geometric-only helper still accepts the chain so ``srs_polished``
+    can use it as a warm-start path with LM polish.
+    """
+    from ssik.kinematics.predicates import _classify_srs_7r_geometric, is_srs_7r
+
+    # 7R chain with strict SRS shoulder (z, y, z meeting at origin),
+    # axis-concurrent but non-Z*Z wrist (z, y, x meeting at (0, 0, -1.0)).
+    kb = _make_chain(
+        positions=[
+            (0, 0, 0),
+            (0, 0, 0),
+            (0, 0, 0),
+            (0, 0, -0.5),  # elbow
+            (0, 0, -0.5),  # wrist start
+            (0, 0, 0),
+            (0, 0, 0),
+        ],
+        axes=[
+            (0, 0, 1),  # j0 z (shoulder)
+            (0, 1, 0),  # j1 y
+            (0, 0, 1),  # j2 z -- Z*Z shoulder
+            (0, 1, 0),  # j3 elbow y
+            (0, 0, 1),  # j4 z (wrist)
+            (0, 1, 0),  # j5 y
+            (1, 0, 0),  # j6 x -- breaks ZYZ (j4 z, j6 x are perpendicular)
+        ],
+    )
+
+    # Strict predicate: must reject (Z*Z wrist fails: z not parallel x).
+    assert is_srs_7r(kb) is None
+    # Geometric helper: still accepts (axes meet at a point).
+    geom = _classify_srs_7r_geometric(kb)
+    assert geom is not None
+    assert geom.shoulder_indices == (0, 1, 2)
+    assert geom.wrist_indices == (4, 5, 6)
+
+
+def test_is_approximately_srs_7r_rejects_non_zyz() -> None:
+    """The Z*Z gate mirrors strict ``is_srs_7r``: ``srs_polished``
+    internally uses ``srs.solve`` for warm starts, which assumes ZYZ
+    Euler decomposition. On non-Z*Z arms the warm starts land 1-3 m
+    off target and LM either fails or converges 5x slower than
+    ``jointlock.seven_r``. Reject non-Z*Z here so the dispatcher falls
+    through (#307).
+    """
+    from ssik.kinematics.predicates import is_approximately_srs_7r
+
+    # Geometrically-SRS (axes meet at a point) but non-Z*Z wrist.
+    kb = _make_chain(
+        positions=[
+            (0, 0, 0),
+            (0, 0, 0),
+            (0, 0, 0),
+            (0, 0, -0.5),
+            (0, 0, -0.5),
+            (0, 0, 0),
+            (0, 0, 0),
+        ],
+        axes=[
+            (0, 0, 1),  # j0 z (shoulder)
+            (0, 1, 0),  # j1 y
+            (0, 0, 1),  # j2 z -- Z*Z shoulder OK
+            (0, 1, 0),  # j3 elbow
+            (0, 0, 1),  # j4 z (wrist)
+            (0, 1, 0),  # j5 y
+            (1, 0, 0),  # j6 x -- breaks Z*Z wrist
+        ],
+    )
+    # Drift is exactly 0 (axes truly concurrent), but Z*Z fails.
+    assert is_approximately_srs_7r(kb, max_drift_m=0.04) is None
+
+
+def test_is_srs_7r_rejects_non_zyz_shoulder() -> None:
+    """Same gate, applied at the shoulder triple (#307)."""
+    from ssik.kinematics.predicates import _classify_srs_7r_geometric, is_srs_7r
+
+    # Non-Z*Z shoulder (z, y, x) but Z*Z wrist (z, y, z).
+    kb = _make_chain(
+        positions=[
+            (0, 0, 0),
+            (0, 0, 0),
+            (0, 0, 0),
+            (0, 0, -0.5),
+            (0, 0, -0.5),
+            (0, 0, 0),
+            (0, 0, 0),
+        ],
+        axes=[
+            (0, 0, 1),  # j0 z
+            (0, 1, 0),  # j1 y
+            (1, 0, 0),  # j2 x -- breaks Z*Z shoulder
+            (0, 1, 0),  # elbow
+            (0, 0, 1),  # j4 z
+            (0, 1, 0),  # j5 y
+            (0, 0, 1),  # j6 z -- Z*Z wrist
+        ],
+    )
+
+    assert is_srs_7r(kb) is None
+    geom = _classify_srs_7r_geometric(kb)
+    assert geom is not None
