@@ -518,6 +518,15 @@ def serialize_derivation(
     a_t = tuple(float(x) for x in a)
     d_t = tuple(float(x) for x in d)
     _, _, _, _, meta = _cached_derivation(alpha_t, a_t, d_t, int(linearity_joint), bool(apply_so3))
+    # If the cached entry came from the AOT prime path (#320), the
+    # build-time-only ``_sym_*`` matrices aren't present -- the AOT
+    # artifact ships the lambdified callables directly, not the
+    # symbolic forms. Run a fresh derivation in that case so the
+    # legacy blob serialiser still produces a valid payload.
+    if "_sym_p_sin" not in meta:
+        _, _, _, _, meta = _derive_pq_for_arm(
+            alpha_t, a_t, d_t, linearity_joint=int(linearity_joint), apply_so3=bool(apply_so3)
+        )
     payload = {
         "version": 1,
         "alpha": alpha_t,
@@ -581,6 +590,48 @@ def prime_derivation_from_blob(blob: bytes) -> None:
         payload["linearity_joint"],
         payload["apply_so3"],
     )
+
+
+def _prime_aot(
+    alpha: tuple[float, ...],
+    a: tuple[float, ...],
+    d: tuple[float, ...],
+    linearity_joint: int,
+    apply_so3: bool,
+    left_bilinear: tuple[int, int],
+    right_bilinear: tuple[int, int],
+    drop_joint: int,
+    p_sin_fn: Callable[..., NDArray[np.float64]],
+    p_cos_fn: Callable[..., NDArray[np.float64]],
+    p_one_fn: Callable[..., NDArray[np.float64]],
+    q_fn: Callable[..., NDArray[np.float64]],
+) -> None:
+    """Populate ``_DERIVATION_CACHE`` + ``_PRIMED_LINEARITY_MAP`` from
+    AOT-baked callables embedded as Python source in the artifact (#320).
+
+    Replacement for :func:`prime_derivation_from_blob`: no sympy work at
+    import. The lambdified callables were emitted as Python source at
+    build time via :func:`inspect.getsource`, so by the time this is
+    called the functions are already live Python objects. Measured
+    ~57x faster than the blob-prime path on Kassow KR810 (4.5 s -> 80 ms
+    cold module-import), with bit-identical numerical output.
+
+    The metadata stored is the lean runtime-only subset that
+    :mod:`ssik.solvers.ikgeo._raghavan_roth.solve_all_ik` actually reads;
+    the symbolic ``_sym_*`` matrices that the build-time
+    :mod:`ssik.codegen._compose.general_6r` composer consumes are NOT
+    shipped because no runtime path uses them.
+    """
+    metadata: dict[str, object] = {
+        "linearity_joint": int(linearity_joint),
+        "apply_so3": bool(apply_so3),
+        "left_bilinear": left_bilinear,
+        "right_bilinear": right_bilinear,
+        "drop_joint": int(drop_joint),
+    }
+    key = (alpha, a, d, int(linearity_joint), bool(apply_so3))
+    _DERIVATION_CACHE[key] = (p_sin_fn, p_cos_fn, p_one_fn, q_fn, metadata)
+    _PRIMED_LINEARITY_MAP[(alpha, a, d)] = (int(linearity_joint), bool(apply_so3))
 
 
 def primed_linearity_for_dh(
