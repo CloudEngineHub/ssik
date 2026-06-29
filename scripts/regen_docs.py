@@ -5,18 +5,22 @@ regions in:
 
   README.md                     prebuilt table + EAIK comparison table
   docs/quickstart.md            prebuilt table
-  docs/arm_coverage.md          per-class rows (6R Pieper, 6R non-Pieper,
-                                7R SRS, 7R approximate-SRS, 7R non-SRS)
+  docs/index.md                 arm count + roster (inline prose anchors)
+  docs/setting_up_your_robot.md arm count (inline prose anchors)
   src/ssik/prebuilt/README.md   build-time / artifact-size table
+  CITATION.cff                  abstract arm count + roster (regex, not anchors --
+                                YAML can't carry HTML-comment anchors)
 
-Each region is delimited by HTML-comment anchors:
+Markdown regions are delimited by HTML-comment anchors, in two forms:
 
-  <!-- AUTOGEN:region_name -->
-  ... generated content (do not edit by hand) ...
+  block (tables):              inline (in-prose values):
+  <!-- AUTOGEN:region_name --> ... <!-- AUTOGEN:arm_count -->25<!-- /AUTOGEN --> ...
+  ... generated content ...
   <!-- /AUTOGEN -->
 
 Outside the anchors the file is untouched. Adding new arms therefore
-only requires editing ``MANIFEST.toml`` and running this script.
+only requires editing ``MANIFEST.toml`` and running this script -- every
+arm count, roster, and table across the docs refreshes from it.
 
 Usage::
 
@@ -29,16 +33,9 @@ the reviewer.
 
 Files this script does NOT yet handle (left for follow-up):
 
-  docs/index.md                       arm count + name list (prose)
-  docs/setting_up_your_robot.md       arm count (prose)
-  outreach/*.md                       counts + prose name lists
-  outreach/conda-forge/meta.yaml      description block
-  CITATION.cff                        abstract count + name list (YAML literal block)
-  examples/04_compare_vs_eaik.py      FIXTURES list (Python source)
-
-Once the anchor framework here is proven, follow-up PRs extend coverage
-to those files. The dominant friction (per-arm table updates across
-README + docs/quickstart + docs/arm_coverage) is solved by this PR.
+  outreach/*.md                       prose name lists (no live counts today)
+  examples/04_compare_vs_eaik.py      FIXTURES list (a standalone demo; the doc
+                                      source of truth is now scripts/regen_bench.py)
 """
 
 from __future__ import annotations
@@ -176,52 +173,23 @@ def _row_readme_eaik(arm: Arm) -> str:
 
 
 def _eaik_cell_for(arm: Arm) -> str:
-    """Lookup the EAIK comparison cell for one arm.
+    """The EAIK comparison cell, read from the manifest's measured
+    ``[arms.X.eaik]`` block.
 
-    EAIK's behaviour is captured here (not in the manifest) because it
-    is a property of EAIK + our bench harness, not of the arm itself.
-    A future cross-library comparison bench (e.g. against TracIK or
-    MINK) would have its own per-class lookup table at the same layer.
-
-    Pieper 6R: EAIK solves analytically (~5 µs). Cells in this branch
-    fall back to a static "no-EAIK-bench-here" tag until the bench
-    harness re-runs EAIK side-by-side. (Most arms in this class haven't
-    been re-benched against EAIK in the current PR.) Override per arm
-    via a future ``arm.bench_eaik`` block if needed.
+    EAIK's behaviour per arm -- whether it has a known decomposition, and if so
+    its timing/FK/branch numbers, else its verbatim refusal string -- is
+    measured by ``scripts/regen_bench.py`` (against EAIK itself) and stored in
+    the manifest, exactly like ssik's own bench. No hand-maintained tables.
     """
-    tags = set(arm.class_tags)
-    if "Pieper" in tags:
-        # UR5 / Puma / Z1 — EAIK is native here. The current README
-        # cells carry the literal "5 ± 0 µs / FK <x> / <sols>" measured
-        # numbers; we preserve those by special-casing the known three.
-        return _PIEPER_EAIK.get(arm.name, "_(no EAIK bench cell yet)_")
-    if "non-Pieper" in tags:
-        return '**refuses** ("6R-Unknown Kinematic Class")'
-    if "approximate-SRS" in tags:
-        return '**refuses** ("only 1-6R")'
-    if "SRS" in tags and arm.fixture_kind == "specs":
-        # 7-joint specs fixture; EAIK's DH adapter rejects on joint count.
-        return "**refuses** (no 7R DH path in bench harness)"
-    if "SRS" in tags:
-        # SRS-class fixtures with URDF intake (#311: iiwa14): EAIK's URDF
-        # loader rejects 7R with the literal "only 1-6R" string.
-        return '**refuses** ("only 1-6R")'
-    if "non-SRS" in tags and arm.fixture_kind == "specs":
-        return "**refuses** (no 7R DH path in bench harness)"
-    if "non-SRS" in tags:
-        # URDF-loaded 7R — EAIK rejects with its actual message
-        return '**refuses** ("only 1-6R")'
-    return "_(uncategorised)_"
-
-
-# Hand-maintained EAIK measurements for Pieper-class arms (UR5, Puma 560,
-# Z1). Updating these requires re-running the bench against EAIK; the
-# numbers don't live in the manifest because they're EAIK's, not ssik's.
-_PIEPER_EAIK: dict[str, str] = {
-    "ur5_ik": "5 ± 0 µs / FK 2e-15 / 2-8 sols",
-    "puma560_ik": "5 ± 0 µs / FK 3e-14 / 8 sols",
-    "z1_ik": "5 ± 0 µs / FK 1e-15 / 4-8 sols",
-}
+    e = arm.eaik
+    if e is None:
+        return "_(no EAIK bench cell yet)_"
+    if not e.supported:
+        return f'**refuses** ("{e.refusal or "unsupported"}")'
+    return (
+        f"{_fmt_time(e.ms_mean, e.ms_ci95)} / FK {_fmt_fk(e.max_fk)} "
+        f"/ {_fmt_sols(e.sols_min, e.sols_max)} sols"
+    )
 
 
 def _row_quickstart_prebuilt(arm: Arm) -> str:
@@ -264,6 +232,15 @@ _ANCHOR_RE = re.compile(
     re.DOTALL,
 )
 
+# Inline variant: open + body + close on a single line, for in-prose values
+# like counts (``ships <!-- AUTOGEN:arm_count -->25<!-- /AUTOGEN --> arms``).
+# Body is newline-free so it never matches the block form above.
+_INLINE_ANCHOR_RE = re.compile(
+    r"(?P<open><!-- AUTOGEN:(?P<name>[a-z0-9_]+) -->)"
+    r"(?P<body>[^\n]*?)"
+    r"(?P<close><!-- /AUTOGEN -->)"
+)
+
 
 def _rewrite_anchors(text: str, renderer: Callable[[str], str | None]) -> str:
     """Replace each anchored region's body with ``renderer(anchor_name)``.
@@ -278,7 +255,7 @@ def _rewrite_anchors(text: str, renderer: Callable[[str], str | None]) -> str:
             return m.group(0)
         return m.group("open") + new_body + m.group("close")
 
-    return _ANCHOR_RE.sub(sub, text)
+    return _INLINE_ANCHOR_RE.sub(sub, _ANCHOR_RE.sub(sub, text))
 
 
 # ---------------------------------------------------------------------------
@@ -308,14 +285,31 @@ def _render(arms: dict[str, Arm], anchor: str) -> str | None:
         rows = [_row_fixture_source(arm) for arm in arms.values()]
         header = "| Module | Fixture provenance |\n|---|---|"
         return header + "\n" + "\n".join(rows)
+    if anchor == "arm_count":
+        return str(len(arms))
+    if anchor == "arm_roster":
+        return ", ".join(arm.short_name for arm in arms.values())
     return None
 
 
 _FILES: list[Path] = [
     REPO_ROOT / "README.md",
     REPO_ROOT / "docs" / "quickstart.md",
+    REPO_ROOT / "docs" / "index.md",
+    REPO_ROOT / "docs" / "setting_up_your_robot.md",
     REPO_ROOT / "src" / "ssik" / "prebuilt" / "README.md",
 ]
+
+# CITATION.cff is YAML (no HTML-comment anchors -- they'd render in the citation
+# abstract), so its arm count + roster are regenerated by targeted regex on the
+# stable surrounding prose instead.
+_CITATION = REPO_ROOT / "CITATION.cff"
+_CITATION_RE = re.compile(r"(It ships )\d+( prebuilt arms\s+\()[^)]*(\))")
+
+
+def _regen_citation(text: str, arms: dict[str, Arm]) -> str:
+    roster = ", ".join(arm.short_name for arm in arms.values())
+    return _CITATION_RE.sub(rf"\g<1>{len(arms)}\g<2>{roster}\g<3>", text)
 
 
 def regenerate(*, check: bool) -> int:
@@ -330,9 +324,12 @@ def regenerate(*, check: bool) -> int:
         return _render(manifest, name)
 
     drift: list[tuple[Path, str, str]] = []
-    for path in _FILES:
+    Transform = Callable[[str, Callable[[str], str | None]], str]
+    targets: list[tuple[Path, Transform]] = [(path, _rewrite_anchors) for path in _FILES]
+    targets.append((_CITATION, lambda text, _r: _regen_citation(text, manifest)))
+    for path, transform in targets:
         original = path.read_text()
-        rewritten = _rewrite_anchors(original, renderer)
+        rewritten = transform(original, renderer)
         if rewritten == original:
             continue
         if check:
