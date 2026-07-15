@@ -218,7 +218,7 @@ def test_franka_artifact_max_solutions_short_circuit() -> None:
     rng = np.random.default_rng(seed=0)
     for _ in range(5):
         q_true = rng.uniform(-1.5, 1.5, size=7)
-        T_target = franka_panda_ik._fk(q_true)
+        T_target = franka_panda_ik.fk(q_true)
 
         # Test exercises analytical-branch enumeration; bypass limits
         # filter so all 64 geometric branches are kept regardless of
@@ -232,29 +232,30 @@ def test_franka_artifact_max_solutions_short_circuit() -> None:
         assert len(sols_all) >= 8, "exhaustive search should produce many solutions"
 
         # FK closure on the short-circuit result.
-        T_check = franka_panda_ik._fk(sols_one[0].q)
+        T_check = franka_panda_ik.fk(sols_one[0].q)
         err = float(np.max(np.abs(T_check - T_target)))
         assert err < 1e-9, f"max_solutions=1 candidate FK closure {err:.2e} > 1e-9"
 
 
 def test_franka_artifact_q_seed_returns_nearest() -> None:
-    """``q_seed`` + ``max_solutions=1`` returns the IK whose lock-joint
-    value is closest to the seed (the trajectory-tracking promise).
-    """
+    """``q_seed`` + ``max_solutions=1`` returns the IK closest to the seed (the
+    trajectory-tracking promise). Franka now uses the spherical-shoulder
+    specialist (#373), which resolves the q6 redundancy in closed form and ranks
+    the returned solutions by full-configuration distance to the seed."""
     from ssik.prebuilt import franka_panda_ik
 
     q_true = np.array([0.0, 0.5, 0.0, -1.5, 0.0, 1.5, 0.0])
-    T_target = franka_panda_ik._fk(q_true)
+    T_target = franka_panda_ik.fk(q_true)
 
-    # Seed exactly at q_true; the corresponding lock-joint sample is
-    # nearest by definition, so the returned IK should match q_true at
-    # the locked joint within a sweep-step.
-    sols = franka_panda_ik.solve(T_target, q_seed=q_true, max_solutions=1)
-    assert len(sols) == 1
-    lock_idx = 4  # baked _LOCK_IDX for Franka
-    sweep_step = (2.8973 - (-2.8973)) / 16  # default 16 samples over the joint range
-    diff = float(((sols[0].q[lock_idx] - q_true[lock_idx] + np.pi) % (2 * np.pi)) - np.pi)
-    assert abs(diff) <= sweep_step + 1e-9, (
-        f"q_seed bias didn't pick the nearest lock sample: "
-        f"diff={diff:.4f}, sweep_step={sweep_step:.4f}"
-    )
+    seeded = franka_panda_ik.solve(T_target, q_seed=q_true, max_solutions=1)
+    assert len(seeded) == 1
+
+    def _linf(q):
+        return float(np.max(np.abs((q - q_true + np.pi) % (2 * np.pi) - np.pi)))
+
+    # The seeded max_solutions=1 result is THE nearest to the seed across the full
+    # solution set (not sampling-granularity dependent -- q6 is sampled discretely
+    # so the exact seed config need not be a returned sample).
+    all_sols = franka_panda_ik.solve(T_target, respect_limits=False)
+    nearest = min(_linf(s.q) for s in all_sols)
+    assert _linf(seeded[0].q) <= nearest + 1e-9, "q_seed didn't return the nearest IK"
