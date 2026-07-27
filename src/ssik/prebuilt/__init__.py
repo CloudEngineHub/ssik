@@ -69,6 +69,11 @@ _LEGACY_ALIASES: dict[str, str] = {
     "standardbots_thor_ik": "standard_bots.thor_ik",
     "standardbots_core_ik": "standard_bots.core_ik",
     "standardbots_spark_ik": "standard_bots.spark_ik",
+    "gen3_lite_ik": "kinova.gen3_lite_ik",
+    "ur7e_ik": "universal_robots.ur7e_ik",
+    "ur12e_ik": "universal_robots.ur12e_ik",
+    "ur15_ik": "universal_robots.ur15_ik",
+    "ur18_ik": "universal_robots.ur18_ik",
 }
 
 _PKG = __name__  # "ssik.prebuilt"
