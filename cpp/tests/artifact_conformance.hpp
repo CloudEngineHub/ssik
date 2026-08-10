@@ -26,10 +26,16 @@ bool wrap_close(const std::array<double, DOF>& a, const std::array<double, DOF>&
 
 // Cases: a container of {std::array<double,16> target; vector<array<double,DOF>>
 // solutions;}. SolveFn: Pose -> vector<Solution<DOF>>.
+// fk_ceiling: the arm's own FK-closure tolerance (its solver's fk_atol). A
+// solution that closes within its solver's tolerance is valid; a global 1e-7 is
+// wrong for families whose gate is looser (RR / general_6r at 1e-5, where force-
+// refined near-double-root solutions settle ~1e-6). The emitter passes it.
 template <int DOF, typename Cases, typename SolveFn>
-int run(const char* name, const JointConsts<DOF>& c, const Cases& cases, SolveFn solve_fn) {
+int run(const char* name, const JointConsts<DOF>& c, const Cases& cases, SolveFn solve_fn,
+        double fk_ceiling = 1e-7) {
   double worst_fk = 0.0;
   int mismatched = 0;
+  int extensions = 0;  // C++ solutions beyond the oracle (valid, sound + distinct)
   for (std::size_t ci = 0; ci < cases.size(); ++ci) {
     const auto& tc = cases[ci];
     Pose T;
@@ -39,28 +45,34 @@ int run(const char* name, const JointConsts<DOF>& c, const Cases& cases, SolveFn
     const auto sols = solve_fn(T);
     for (const auto& s : sols) worst_fk = std::max(worst_fk, (fk<DOF>(c, s.q) - T).norm());
 
-    bool ok = sols.size() == tc.solutions.size();
+    // #487 conformance: relative completeness + soundness, NOT bit-exact match.
+    // C++ (Eigen JacobiSVD / RealQZ) is legitimately more complete than the
+    // numpy oracle at degenerate poses, and numpy's completeness is LAPACK-
+    // backend-dependent (OpenBLAS finds fewer than Accelerate). So a C++ EXTRA
+    // that FK-closes + is distinct is a valid extension, not a mismatch. A real
+    // failure is: C++ MISSING an oracle solution, or a duplicate C++ branch.
+    bool ok = true;
     for (const auto& e : tc.solutions) {
       bool found = false;
       for (const auto& s : sols)
         if (wrap_close<DOF>(e, s.q, 1e-3)) { found = true; break; }
-      if (!found) ok = false;
+      if (!found) ok = false;  // C++ dropped a solution the oracle found
     }
-    for (const auto& s : sols) {
-      bool found = false;
-      for (const auto& e : tc.solutions)
-        if (wrap_close<DOF>(e, s.q, 1e-3)) { found = true; break; }
-      if (!found) ok = false;
-    }
+    for (std::size_t i = 0; i < sols.size(); ++i)
+      for (std::size_t j = i + 1; j < sols.size(); ++j)
+        if (wrap_close<DOF>(sols[i].q, sols[j].q, 1e-3)) ok = false;  // duplicate branch
+    if (sols.size() > tc.solutions.size()) extensions += sols.size() - tc.solutions.size();
     if (!ok) {
       ++mismatched;
       if (mismatched <= 5)
-        std::printf("  case %zu: artifact=%zu oracle=%zu\n", ci, sols.size(), tc.solutions.size());
+        std::printf("  case %zu: artifact=%zu oracle=%zu (C++ missing an oracle sol or dup)\n", ci,
+                    sols.size(), tc.solutions.size());
     }
   }
-  std::printf("%s self-contained artifact: %zu poses, worst FK = %.3e, mismatches = %d\n", name,
-              cases.size(), worst_fk, mismatched);
-  if (worst_fk < 1e-7 && mismatched == 0) {
+  std::printf(
+      "%s self-contained artifact: %zu poses, worst FK = %.3e, incomplete/dup = %d, extensions = %d\n",
+      name, cases.size(), worst_fk, mismatched, extensions);
+  if (worst_fk <= fk_ceiling && mismatched == 0) {
     std::printf("PASS\n");
     return 0;
   }

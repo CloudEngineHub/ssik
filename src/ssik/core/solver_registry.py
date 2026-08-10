@@ -106,6 +106,27 @@ SOLVERS: dict[str, SolverSpec] = {
         _spec("ikgeo.spherical", 0, 7.5, 10_312, composer=f"{_COMPOSE}.spherical"),
         _spec("ikgeo.two_parallel", 1, 261.0, 141_569, auto_dispatch=False),
         _spec("ikgeo.two_intersecting", 1, 1184.0, 2_650_681, auto_dispatch=False),
+        # force_refine (#528): at near-double roots (degenerate 6R poses, e.g.
+        # m0609 / m1013 / hc10) det M(x) has two tiny singular values, so the
+        # back-sub null-vector v_12 is numerically delicate; numpy's SVD resolves
+        # it less accurately than a one-sided Jacobi, leaving genuine solutions at
+        # ~1e-4 FK that get silently dropped. Always-polish recovers them
+        # (converge -> kept) while spurious near-misses stall -> dropped. Surfaced
+        # by the native C++ (Eigen JacobiSVD) artifact finding all 8 where the
+        # un-refined Python found 4 (#490). Gate stays at the default 1e-5
+        # (subproblem_numerical): a tightened 1e-7 target refined too many
+        # candidates (perf) and put solutions on a 1e-7 boundary where Eigen vs
+        # numpy disagreed (m1013 cross-backend count mismatch). The native gate
+        # ceiling is per-arm (the solver's fk_atol), so 1e-6-settling RR solutions
+        # pass without the tightening.
+        # KNOWN measure-zero gap (#531): at an *exact* rank-deficient ridge,
+        # force_refine partially heals the pose (non-empty), which suppresses the
+        # empty-gated T-perturbation rescue for a branch that is a genuinely
+        # complex root there (real only under perturbation). Analytical recovery
+        # is fragile (linearization-dependent) and the robust rescue-union
+        # over-fires (~50-70% of poses); see #531 for the full analysis. Never
+        # affects a real pose -- the fuzz + full C++ gate are complete; only the
+        # 3 xfail'd exact-ridge reproducers in test_refinement_rescue.py hit it.
         _spec(
             "ikgeo.general_6r",
             2,
@@ -113,6 +134,7 @@ SOLVERS: dict[str, SolverSpec] = {
             30_000_000,
             needs_symbolic_precompute=True,
             composer=f"{_COMPOSE}.general_6r",
+            force_refine=True,
         ),
         _spec("husty_pfurner.general_6r", 2, 120.0, 50_000_000),
         _spec("seven_r.srs", 0, 8.5, 1_900),
