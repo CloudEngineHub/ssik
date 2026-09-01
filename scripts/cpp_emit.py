@@ -63,11 +63,13 @@ def _render_limits(joints: list[Any]) -> list[str]:
 # C++ consumer calls ssik::<arm>::solve(T) with zero Python. Families not listed
 # here (or arms outside a family's native domain) emit constants only (self-
 # contained solve pending their port).
-def _render_solve(solver: str, kb: KinBody) -> tuple[str, list[str]] | None:
+def _render_solve(solver: str, kb: KinBody, arm: str = "") -> tuple[str, list[str]] | None:
     if solver == "seven_r.srs":
         return _render_srs_solve(kb)
     if solver == "ikgeo.general_6r":
         return _render_general_6r_solve(kb)
+    if solver == "jointlock.seven_r":
+        return _render_jointlock_solve(arm, kb)
     fn = {
         "ikgeo.three_parallel": ("three_parallel", "three_parallel_artifact_solve"),
         "ikgeo.spherical_two_parallel": (
@@ -134,37 +136,74 @@ def _render_srs_solve(kb: KinBody) -> tuple[str, list[str]] | None:
     )
 
 
-def _render_general_6r_solve(kb: KinBody) -> tuple[str, list[str]] | None:
-    """Self-contained general-6R (Raghavan-Roth) solve(): bakes the DH bridge +
-    AE-3 leftvar metadata (RrConsts), emits the CSE'd coefficient function, and
-    composes general_6r_artifact_solve. None only for a non-6R chain."""
-    if len(kb.joints) != 6 or any(j.joint_type != "revolute" for j in kb.joints):
-        return None
+def _snap_dh(vals: np.ndarray, canonicals: tuple[float, ...], atol: float = 1e-6) -> np.ndarray:
+    """Snap DH values within ``atol`` of a canonical value to exactly that value.
+
+    A degenerate locked sub-chain (near-parallel axes at some lock samples) has a
+    twist that is geometrically exactly 0 or +/-pi and a link length exactly 0,
+    but poe_to_dh returns them as canonical +/- ~1e-8 numeric error whose low bits
+    differ across BLAS backends. Left raw, that error propagates into the RR
+    derivation as ~1e-8..1e-12 noise coefficients that straddle the CSE
+    zero-threshold across platforms -> non-deterministic header structure (#536).
+    Snapping the SOURCE to exact collapses those products (0.0*x is exactly 0;
+    sin(exact pi) is ~1e-16, well below the threshold), so the emit is
+    backend-deterministic. atol=1e-6 >> the ~1e-8 numeric error but << any genuine
+    DH spacing, so a real near-canonical design value is never touched. Only the
+    degenerate samples' spurious solutions are affected, and those are dropped by
+    the 7R re-verify regardless."""
+    out = np.array(vals, dtype=float)
+    for i in range(out.size):
+        for c in canonicals:
+            if abs(out[i] - c) < atol:
+                out[i] = c
+                break
+    return out
+
+
+def _render_rr_unit(kb: KinBody, suffix: str = "", zero_threshold: float = 0.0) -> list[str]:
+    """Render ``rr_consts<suffix>()`` + ``rr_coeffs<suffix>(...)`` for one 6R
+    KinBody: the baked DH bridge + AE-3 leftvar (RrConsts) + the CSE'd coefficient
+    function. Shared by the general_6r artifact and the jointlock per-sample fan-
+    out (each locked 6R sub-chain is its own RR unit).
+
+    ``zero_threshold`` is passed to render_rr_coeffs to drop numerical-noise
+    coefficients (jointlock degenerate sub-chains, #536); general_6r leaves it 0.
+    When set, DH values near a canonical (0, +/-pi/2, +/-pi) are also snapped to
+    exact at the source, which is what makes the noise land firmly below the
+    threshold on every backend rather than straddle it."""
     from _rr_emit import render_rr_coeffs
 
     from ssik.kinematics.poe_to_dh import poe_to_dh
-    from ssik.solvers.ikgeo._raghavan_roth import _cached_best_leftvar, _cached_derivation
+    from ssik.solvers.ikgeo._raghavan_roth import _cached_best_leftvar, _derive_pq_for_arm
 
     dh = poe_to_dh(kb)
     alpha, a, d = dh.to_dh_tuple()
-    lin = int(_cached_best_leftvar(tuple(alpha.tolist()), tuple(a.tolist()), tuple(d.tolist())))
-    *_fns, meta = _cached_derivation(
-        tuple(alpha.tolist()), tuple(a.tolist()), tuple(d.tolist()), lin, False
-    )
+    theta_offset = np.array(dh.theta_offset, dtype=float)
+    if zero_threshold > 0.0:
+        angles = (0.0, np.pi / 2, -np.pi / 2, np.pi, -np.pi)
+        alpha = _snap_dh(alpha, angles)
+        theta_offset = _snap_dh(theta_offset, angles)
+        a = _snap_dh(a, (0.0,))
+        d = _snap_dh(d, (0.0,))
+    at, bt, dt = tuple(alpha.tolist()), tuple(a.tolist()), tuple(d.tolist())
+    lin = int(_cached_best_leftvar(at, bt, dt))
+    # Derive directly (not _cached_derivation): importing a jointlock arm primes
+    # the derivation cache with AOT-lambdified entries that lack the `_sym_*`
+    # symbolic matrices render_rr_coeffs needs. The fresh derivation always
+    # carries them (and uses the same raw DH, so the emitted literals are stable).
+    *_fns, meta = _derive_pq_for_arm(at, bt, dt, linearity_joint=lin)
     lb0, lb1 = cast("tuple[int, int]", meta["left_bilinear"])
     rb0, rb1 = cast("tuple[int, int]", meta["right_bilinear"])
     drop = cast(int, meta["drop_joint"])
     t_pre_inv = np.linalg.inv(dh.t_pre)
     t_post_inv = np.linalg.inv(dh.t_post)
-
-    body = [
-        "// Baked RR geometry (poe_to_dh DH bridge + AE-3 leftvar), zero runtime Python.",
-        "inline RrConsts rr_consts() {",
+    return [
+        f"inline RrConsts rr_consts{suffix}() {{",
         "  RrConsts r;",
         f"  r.alpha = {{{', '.join(_f(v) for v in alpha)}}};",
         f"  r.a = {{{', '.join(_f(v) for v in a)}}};",
         f"  r.d = {{{', '.join(_f(v) for v in d)}}};",
-        f"  r.theta_offset = {{{', '.join(_f(v) for v in dh.theta_offset)}}};",
+        f"  r.theta_offset = {{{', '.join(_f(v) for v in theta_offset)}}};",
         f"  r.t_pre_inv = {_mat4(t_pre_inv)};",
         f"  r.t_post_inv = {_mat4(t_post_inv)};",
         f"  r.linearity_joint = {lin};",
@@ -174,7 +213,29 @@ def _render_general_6r_solve(kb: KinBody) -> tuple[str, list[str]] | None:
         "  return r;",
         "}",
         "",
-        *render_rr_coeffs(meta),
+        # No CSE on the jointlock path (zero_threshold > 0): sympy.cse shares
+        # subexpressions by exact float equality, and a degenerate sub-chain's
+        # backend-variant coefficient low bits break a share on one platform but
+        # not another -> non-portable temp set (#536). Without CSE the emitted
+        # structure is exactly the (threshold-stabilised) non-zero-coefficient set,
+        # which IS backend-deterministic; and after the threshold the polynomials
+        # are short enough that no-CSE is also smaller than the CSE'd form.
+        *render_rr_coeffs(
+            meta,
+            name=f"rr_coeffs{suffix}",
+            zero_threshold=zero_threshold,
+            use_cse=(zero_threshold == 0.0),
+        ),
+    ]
+
+
+def _render_general_6r_solve(kb: KinBody) -> tuple[str, list[str]] | None:
+    """Self-contained general-6R (Raghavan-Roth) solve(). None for a non-6R chain."""
+    if len(kb.joints) != 6 or any(j.joint_type != "revolute" for j in kb.joints):
+        return None
+    body = [
+        "// Baked RR geometry (poe_to_dh DH bridge + AE-3 leftvar), zero runtime Python.",
+        *_render_rr_unit(kb),
         "",
         "// Self-contained IK solve -- header-only C++, no Python runtime.",
         "inline std::vector<Solution<DOF>> solve(",
@@ -183,6 +244,156 @@ def _render_general_6r_solve(kb: KinBody) -> tuple[str, list[str]] | None:
         "}",
     ]
     return ('#include "ssik_cpp/solvers/general_6r.hpp"', body)
+
+
+def _jointlock_rr_complete(arm: str, kb: KinBody, n_probe: int = 150) -> bool:
+    """ONBOARDING TOOL (not called at emit time): decide whether a new jointlock
+    7R arm's RR-only lock-sweep covers it, to set its membership in
+    ``_HP_DEFERRED_JOINTLOCK_ARMS``. It runs backend-sensitive oracle solves, so
+    its result can flip across BLAS backends at a borderline pose -- fine for a
+    one-time human-run onboarding decision, but it must NOT drive the per-emit
+    header structure (that has to be byte-deterministic for the --check drift
+    guard, #536). Run this when adding a jointlock arm; bake the answer.
+
+    True iff a native RR-only lock-sweep (no HP kernel, no rescue) can cover the
+    arm, tested two ways over n_probe reachable poses (#535):
+
+    1. HP-fire: if the Python oracle ever dispatches to the HP Study-quaternion
+       kernel, an RR-only artifact CANNOT reproduce that pose by definition (HP
+       found a root cached-RR could not). This is the sensitive signal -- it fires
+       whenever ANY of the 16 lock samples needs HP (~16% of poses for kassow), so
+       n_probe=150 catches it with overwhelming probability and returns early.
+    2. Direct sweep-vs-oracle: even without HP, the native RR sweep (different
+       numerics than Python's cached-RR) must not miss any oracle solution.
+
+    The old HP-fire-only probe used just 20 poses and let kassow through; the rescue
+    then MASKED the gap at the gate. Deferred (RR-incomplete) arms stay
+    constants-only until the HP kernel lands (#491). The full gate is the
+    deterministic backstop if this ever wrongly returns True."""
+    from unittest.mock import patch
+
+    import ssik.solvers.husty_pfurner.general_6r as _hp
+    from ssik.core.tolerances import DEFAULT_TOLERANCE_POLICY as _pol
+    from ssik.refinement import dedup_by_wrap_close
+    from ssik.solvers.ikgeo import general_6r as _g6
+    from ssik.solvers.jointlock.seven_r import _lock_joint, choose_lock_joint
+
+    lock = int(choose_lock_joint(kb))
+    lo0, hi0 = kb.joints[lock].limits or (-np.pi, np.pi)
+    samples = np.linspace(lo0, hi0, 16, endpoint=False)
+    mod = importlib.import_module(f"ssik.prebuilt.{arm}")
+    fk_atol, dedup_atol = _pol.subproblem_numerical, _pol.subproblem_dedup
+    rng = np.random.default_rng(0)
+    ranges = [j.limits if j.limits else (-np.pi, np.pi) for j in kb.joints]
+    # jointlock imports this module object as hp_general_6r and looks up .solve at
+    # call time, so one patch counts every HP-kernel dispatch inside mod.solve.
+    fired = {"n": 0}
+    orig = _hp.solve
+
+    def counting(*a: Any, **k: Any) -> Any:
+        fired["n"] += 1
+        return orig(*a, **k)
+
+    with patch.object(_hp, "solve", counting):
+        for _ in range(n_probe):
+            q = np.array([rng.uniform(lo, hi) for lo, hi in ranges])
+            t = np.asarray(poe_forward_kinematics(kb, q), dtype=np.float64)
+            before = fired["n"]
+            oracle = list(mod.solve(t, respect_limits=False))
+            if fired["n"] > before:
+                return False  # oracle needed the HP kernel -> RR-only artifact can't cover it
+            # RR-only sweep, mirroring the native runtime: lock -> RR solve -> pad
+            # -> 7R re-verify against the actual target -> dedup. _g6 never routes
+            # to HP, so this stays a pure RR sweep.
+            cands = []
+            for q_lock in samples:
+                sub = _lock_joint(kb, lock, float(q_lock))
+                sols, _ = _g6.solve(sub, t)
+                for s in sols:
+                    q7 = np.insert(s.q, lock, q_lock)
+                    if np.linalg.norm(poe_forward_kinematics(kb, q7) - t) <= fk_atol:
+                        cands.append(_Sol(q7))
+            sweep = dedup_by_wrap_close(cands, dedup_atol)
+            for o in oracle:
+                if not any(_wrap_close(o.q, s.q, dedup_atol) for s in sweep):
+                    return False  # oracle solution the RR-only sweep misses
+    return True
+
+
+class _Sol:
+    """Minimal Solution stand-in for dedup_by_wrap_close in the RR-completeness probe."""
+
+    def __init__(self, q: np.ndarray) -> None:
+        self.q = q
+        self.fk_residual = 0.0
+
+
+def _wrap_close(a: np.ndarray, b: np.ndarray, atol: float) -> bool:
+    return bool(np.max(np.abs((a - b + np.pi) % (2 * np.pi) - np.pi)) < atol)
+
+
+# Jointlock 7R arms whose locked sub-chains genuinely need the HP Study-quaternion
+# kernel (their RR-only sweep is incomplete), so they ship constants-only until
+# the HP native kernel lands (#491). This is a COMMITTED decision, not a per-emit
+# recompute: `_jointlock_rr_complete` runs backend-sensitive oracle solves (SVD /
+# eig near singularities), so its True/False can FLIP across BLAS backends
+# (Accelerate vs OpenBLAS) at a borderline pose -- which would make the emitted
+# header structure platform-dependent and break the --check drift guard (#536).
+# The direct check remains the onboarding tool that DECIDES membership here (run
+# it when adding a jointlock arm); baking the result keeps every re-emit
+# byte-deterministic. Correctness of the set is backstopped by the artifact gate:
+# an RR-covered arm listed here would lose coverage (caught by review), and an
+# HP-needing arm NOT listed would gate-fail loudly (its sweep misses the oracle).
+_HP_DEFERRED_JOINTLOCK_ARMS = {"kassow_kr810_ik"}
+
+
+def _render_jointlock_solve(arm: str, kb: KinBody) -> tuple[str, list[str]] | None:
+    """Self-contained jointlock.seven_r solve() for RR-covered arms: bake the lock
+    joint + 16-sample schedule + each locked 6R sub-chain's RR unit, and compose
+    the sweep (jointlock_artifact_solve). None for HP-needing arms (kassow)."""
+    from ssik.solvers.jointlock.seven_r import _lock_joint, choose_lock_joint
+
+    if len(kb.joints) != 7 or arm in _HP_DEFERRED_JOINTLOCK_ARMS:
+        return None
+    lock = int(choose_lock_joint(kb))
+    j = kb.joints[lock]
+    lo, hi = j.limits if j.limits else (-np.pi, np.pi)
+    samples = np.linspace(lo, hi, 16, endpoint=False)
+
+    body = [
+        f"// Jointlock 7R: lock joint {lock}, sweep 16 samples, RR-solve each 6R sub-chain.",
+        "inline JointlockConsts<16> jl_consts() {",
+        "  JointlockConsts<16> j;",
+        f"  j.lock_idx = {lock};",
+        f"  j.q_lock = {{{', '.join(_f(v) for v in samples)}}};",
+        "  return j;",
+        "}",
+        "",
+    ]
+    for i, q_lock in enumerate(samples):
+        body += ["", f"// --- lock sample {i} (q_lock = {_f(q_lock)}) ---"]
+        # zero_threshold: degenerate lock samples (near-parallel axes) push
+        # poe_to_dh coefficient products down to ~1e-18 noise whose low bits are
+        # BLAS-backend-sensitive; drop them so the emitted header is byte-
+        # deterministic across platforms (#536). 1e-12 relative is far below any
+        # genuine RR coefficient (DH products, O(1e-3)..O(1)).
+        body += _render_rr_unit(_lock_joint(kb, lock, float(q_lock)), f"_{i}", zero_threshold=1e-12)
+    body += [
+        "",
+        "inline std::array<RrConsts, 16> jl_rr() {",
+        "  return {" + ", ".join(f"rr_consts_{i}()" for i in range(16)) + "};",
+        "}",
+        "inline std::array<RrCoeffFn, 16> jl_coeffs() {",
+        "  return {" + ", ".join(f"rr_coeffs_{i}" for i in range(16)) + "};",
+        "}",
+        "",
+        "inline std::vector<Solution<DOF>> solve(",
+        "    const Pose& T, const ArtifactParams<DOF>& p = {}) {",
+        "  return jointlock_artifact_solve<16>(consts(), jl_consts(), jl_rr(), jl_coeffs(),",
+        "                                      limits(), T, p);",
+        "}",
+    ]
+    return ('#include "ssik_cpp/solvers/jointlock_seven_r.hpp"', body)
 
 
 def _consts_kinbody(arm_solver: str, kb: KinBody) -> KinBody:
@@ -229,7 +440,7 @@ def emit(arm: str, out_dir: Path, n_parity: int = 200, seed: int = 0) -> None:
 
     # --- Self-contained C++ artifact: baked constants + limits + solve() ----
     solver = load_manifest()[arm].solver
-    rendered_solve = _render_solve(solver, kb)
+    rendered_solve = _render_solve(solver, kb, arm)
     header_include = rendered_solve[0] if rendered_solve else '#include "ssik_cpp/fk.hpp"'
     title = (
         f"// Self-contained C++ IK artifact for {arm} ({dof}-DOF): baked constants"
@@ -313,7 +524,7 @@ def emit(arm: str, out_dir: Path, n_parity: int = 200, seed: int = 0) -> None:
     # solve() output per pose, so a standalone C++ program (which can't call
     # Python) can validate ssik::<arm>::solve(T) against the oracle. Emitted for
     # arms with a self-contained C++ solve().
-    if _render_solve(load_manifest()[arm].solver, kb) is not None:
+    if _render_solve(load_manifest()[arm].solver, kb, arm) is not None:
         _emit_solve_parity(arm, out_dir, ns, ranges, seed=seed + 2)
 
 
@@ -553,34 +764,65 @@ def emit_artifact_gate(gen_dir: Path) -> None:
 _FLOAT_LITERAL_RE = re.compile(
     r"[-+]?(?:\d+\.\d*(?:[eE][-+]?\d+)?|\.\d+(?:[eE][-+]?\d+)?|\d+[eE][-+]?\d+)"
 )
-# Cross-platform ULP tolerance for computed baked geometry (#517/#82). The SRS
-# artifact bakes constants derived from FK + a home-gauge matmul, whose low bits
-# carry BLAS-backend variance; a real un-re-emitted oracle change moves geometry
-# by >> this, so the guard stays sharp.
-_DRIFT_ATOL = 1e-12
-_DRIFT_RTOL = 1e-10
+# Cross-platform tolerance for computed baked geometry (#517/#82). The SRS
+# artifact bakes constants from FK + a home-gauge matmul, and the jointlock RR
+# units bake poe_to_dh of 16 locked sub-chains -- some at a degenerate lock
+# sample where an angle is exactly +/-pi and its low bits (~1e-9) differ between
+# BLAS backends (Accelerate vs OpenBLAS, #536). A real un-re-emitted oracle
+# change moves geometry by >> this (mm / rad, i.e. >> 1e-6), so the guard stays
+# sharp: it only tolerates the last few bits of a computed value, never a change.
+_DRIFT_ATOL = 1e-11
+_DRIFT_RTOL = 1e-8
 
 
-def _constants_match(committed: str, fresh: str) -> bool:
-    """True when two constants headers are identical up to cross-platform ULP.
+def _constants_match(committed: str, fresh: str) -> tuple[bool, float, str]:
+    """Whether two constants headers are identical up to cross-platform ULP,
+    plus a one-line diagnostic of the worst float delta.
 
     Byte comparison is too strict for headers that bake *computed* geometry (the
     SRS ``ee_offset_local`` etc. go through FK + an ``R_home.T`` matmul whose low
-    bits are BLAS-backend-sensitive, #517/#82). Instead: the non-float structure
+    bits are BLAS-backend-sensitive, #517/#82; the jointlock RR units bake
+    poe_to_dh of 16 locked sub-chains, #536). Instead: the non-float structure
     (identifiers, integers, layout) must match exactly, and every float literal
     must match within ``_DRIFT_ATOL``/``_DRIFT_RTOL`` -- orders of magnitude below
     any real geometry change, so a forgotten re-emit still turns the guard red.
     Pure-``repr`` constants (ur5, irb6700) match exactly and are unaffected.
+
+    :returns: ``(ok, worst_ratio, detail)`` where ``worst_ratio`` is the largest
+        delta-over-budget (>1 means a real mismatch) and ``detail`` names it (so a
+        near-miss or a pass-with-margin is visible in CI logs).
     """
     if _FLOAT_LITERAL_RE.sub("~", committed) != _FLOAT_LITERAL_RE.sub("~", fresh):
-        return False
+        cl, fl = committed.count("\n"), fresh.count("\n")
+        first = next(
+            (
+                i + 1
+                for i, (a, b) in enumerate(
+                    zip(committed.splitlines(), fresh.splitlines(), strict=False)
+                )
+                if _FLOAT_LITERAL_RE.sub("~", a) != _FLOAT_LITERAL_RE.sub("~", b)
+            ),
+            min(cl, fl) + 1,
+        )
+        return (
+            False,
+            float("inf"),
+            f"structural mismatch (non-float text differs): committed {cl} lines vs fresh {fl} "
+            f"lines, first structural diff at line {first}",
+        )
     ca = [float(x) for x in _FLOAT_LITERAL_RE.findall(committed)]
     fa = [float(x) for x in _FLOAT_LITERAL_RE.findall(fresh)]
     if len(ca) != len(fa):
-        return False
-    return all(
-        abs(c - f) <= _DRIFT_ATOL + _DRIFT_RTOL * abs(f) for c, f in zip(ca, fa, strict=True)
-    )
+        return False, float("inf"), f"float count differs ({len(ca)} vs {len(fa)})"
+    worst_ratio, worst_detail = 0.0, "identical"
+    for c, f in zip(ca, fa, strict=True):
+        delta = abs(c - f)
+        budget = _DRIFT_ATOL + _DRIFT_RTOL * abs(f)
+        ratio = delta / budget if budget > 0 else 0.0
+        if ratio > worst_ratio:
+            worst_ratio = ratio
+            worst_detail = f"|Δ|={delta:.2e} at value {f:.12g} (budget {budget:.2e}, {ratio:.2f}x)"
+    return worst_ratio <= 1.0, worst_ratio, worst_detail
 
 
 def check_no_drift(gen_dir: Path) -> int:
@@ -604,6 +846,7 @@ def check_no_drift(gen_dir: Path) -> int:
         print("[cpp_emit] --check: no emitted arms found in", gen_dir)
         return 0
     stale: list[str] = []
+    worst_overall = (0.0, "", "")  # (ratio, arm, detail) across all arms, for CI visibility
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         for arm in arms:
@@ -612,8 +855,14 @@ def check_no_drift(gen_dir: Path) -> int:
             fresh = tmp_dir / f"{arm}.hpp"
             if not committed.exists():
                 stale.append(f"{arm}.hpp (missing from cpp/gen)")
-            elif not _constants_match(committed.read_text(), fresh.read_text()):
-                stale.append(f"{arm}.hpp (differs from a fresh emit)")
+                continue
+            ok, ratio, detail = _constants_match(committed.read_text(), fresh.read_text())
+            if ratio > worst_overall[0]:
+                worst_overall = (ratio, arm, detail)
+            if not ok:
+                stale.append(f"{arm}.hpp (differs from a fresh emit): {detail}")
+    if worst_overall[1]:
+        print(f"[cpp_emit] --check worst float delta: {worst_overall[1]} -> {worst_overall[2]}")
     if stale:
         print("[cpp_emit] --check FAILED: native artifacts are stale vs the Python oracle:")
         for s in stale:
