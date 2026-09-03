@@ -13,6 +13,8 @@ endif()
 # so a bare in-tree `cmake ..` still builds without Eigen3Config on the path. No
 # version pin: ssik uses only stable Eigen basics, and pinning a MAJOR (e.g. 3.3)
 # makes SameMajorVersion reject a newer Eigen (5.x on current Homebrew).
+# std::thread (parallel.hpp, #546) needs the platform thread library linked.
+find_package(Threads REQUIRED)
 find_package(Eigen3 QUIET NO_MODULE)
 if(TARGET Eigen3::Eigen)
   set(SSIK_EIGEN Eigen3::Eigen)
@@ -38,7 +40,9 @@ target_include_directories(ssik_cpp INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gen>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-target_link_libraries(ssik_cpp INTERFACE ${SSIK_EIGEN})
+# parallel.hpp uses std::thread (jointlock sweep / rescue / batch, #546), so every
+# consumer of the headers links the platform thread library.
+target_link_libraries(ssik_cpp INTERFACE ${SSIK_EIGEN} Threads::Threads)
 target_compile_features(ssik_cpp INTERFACE cxx_std_20)
 
 # Install + export the header-only package so a downstream C++/MoveIt project can
@@ -94,6 +98,17 @@ add_test(NAME ur5_fk COMMAND test_ur5_fk)
 add_executable(test_ur5_newton tests/test_ur5_newton.cpp)
 target_link_libraries(test_ur5_newton PRIVATE ssik_cpp)
 add_test(NAME ur5_newton COMMAND test_ur5_newton)
+
+# parallel_for primitive (#546): coverage, no-race, worker-count independence.
+add_executable(test_parallel tests/test_parallel.cpp)
+target_link_libraries(test_parallel PRIVATE ssik_cpp Threads::Threads)
+add_test(NAME parallel COMMAND test_parallel)
+
+# solve_batch equivalence (#546): parallel batch == serial per-pose solve.
+add_executable(test_batch tests/test_batch.cpp)
+target_link_libraries(test_batch PRIVATE ssik_cpp)
+target_include_directories(test_batch PRIVATE gen)
+add_test(NAME batch COMMAND test_batch)
 
 # THE GATE (data-driven): every self-contained artifact validated against its
 # Python oracle golden, zero pybind/Python. The arm list is generated into
