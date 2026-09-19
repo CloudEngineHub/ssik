@@ -169,6 +169,9 @@ inline std::vector<Solution<6>> three_parallel_artifact_solve(const JointConsts<
   // solution", so it must not depend on the seed-tolerance / max_solutions
   // filters. Seed/truncate is applied afterwards over the in-limits set.
   ArtifactParams<6> p_limits;
+  // Intermediate pass: never lift here, or the lifts would be produced
+  // twice (see ArtifactParams::enumerate_windings).
+  p_limits.enumerate_windings = false;
   p_limits.respect_limits = p.respect_limits;
   p_limits.refinement_max_iters = p.refinement_max_iters;
   std::vector<Solution<6>> in_limits = finalize_solutions<6>(core(T), c, lim, p_limits);
@@ -177,6 +180,9 @@ inline std::vector<Solution<6>> three_parallel_artifact_solve(const JointConsts<
   }
   ArtifactParams<6> p_seed = p;
   p_seed.respect_limits = false;
+  // The single lifting stage (#562): this is the call that yields the returned
+  // set. Skipped when the caller wanted the raw geometric set.
+  p_seed.enumerate_windings = p.enumerate_windings && p.respect_limits;
   return finalize_solutions<6>(std::move(in_limits), c, lim, p_seed);
 }
 

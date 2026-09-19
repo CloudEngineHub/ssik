@@ -343,7 +343,11 @@ def test_ik_overhead_under_300us() -> None:
     # (see tests._perf) is the noise floor, so their difference isolates the
     # Manipulator wrapper's true per-call cost instead of the differenced
     # scheduler noise of two means (which can even go negative under load).
-    manip_ms = best_call_ms(lambda: arm.solve(T), warmup=20, runs=200)
+    # Measured with enumerate_windings=False: the UR5's five [-2pi, 2pi] joints
+    # lift 8 geometric branches to 256 in-limit configurations (#562), and
+    # building 32x the Solution objects is a real, intended cost that would
+    # swamp the wrapper overhead this gate exists to watch.
+    manip_ms = best_call_ms(lambda: arm.solve(T, enumerate_windings=False), warmup=20, runs=200)
     raw_ms = best_call_ms(lambda: three_parallel.solve(arm.kinbody, T), warmup=20, runs=200)
 
     overhead = (manip_ms - raw_ms) * 1e3  # ms -> us
@@ -351,6 +355,17 @@ def test_ik_overhead_under_300us() -> None:
         f"Manipulator.solve overhead {overhead:.1f} us > 300 us regression gate "
         f"(manip={manip_ms * 1e3:.1f} us, raw={raw_ms * 1e3:.1f} us)"
     )
+
+
+def test_winding_enumeration_counts_but_does_not_break_the_wrapper() -> None:
+    """The wrapper lifts each geometric branch to its in-limit representatives
+    (#562). The cost of that is gated in tests/test_winding_enumeration.py; here
+    we only pin the count so the overhead gate above keeps measuring the
+    un-enumerated path deliberately rather than by accident."""
+    arm = ssik.Manipulator.from_urdf(FIXTURES / "ur5.urdf", base="base_link", ee="ee_link")
+    T = arm.fk(np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]))
+    assert len(arm.solve(T, enumerate_windings=False)) == 8
+    assert len(arm.solve(T)) == 256  # 8 branches x 2^5 wide joints
 
 
 # ---------------------------------------------------------------------------
