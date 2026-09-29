@@ -26,7 +26,9 @@ Platforms
     applies only there. The round-off class (``ROUNDOFF_CLASSES``: F,
     exact-limit angles beyond the limit band) differs even between CI runners
     of one platform, so its known cells are non-strict until #632 makes them
-    reproducible; an F gap on an arm not listed still fails.
+    reproducible; an F gap on an arm not listed still fails. The few cells of
+    a strict class that do the same (``RUNNER_DEPENDENT_CELLS``) are
+    non-strict too, each until its named issue is fixed.
 
 Reproduce a failure: the message names the pose id (``<stratum>/<index>``);
 ``tests._native_parity.poses(arm, "full")`` returns its ``q``, and
@@ -112,19 +114,16 @@ KNOWN_REVERSE: dict[str, dict[str, tuple[str, ...]]] = {
         "m1013_ik": ALL,
         "piper_ik": ALL,
         "standardbots_thor_ik": ALL,
-        "xarm6_ik": ALL,
         "xmatecr7_ik": ALL,
     },
     "J": {
         "fanuc_crx10ia_ik": ALL,
-        "fanuc_crx10ial_ik": ALL,
         "fanuc_crx10ialp_ik": ALL,
         "fanuc_crx20ial_ik": ALL,
-        "fanuc_crx30ia_ik": ALL,
-        "fanuc_crx3ia_ik": ALL,
+        "fanuc_crx30ia_ik": ("linux",),
+        "fanuc_crx3ia_ik": ("linux",),
         "hc10_ik": ALL,
         "hh020_ik": ALL,
-        "jaco2_ik": ALL,
         "kr210_r2700_ik": ALL,
         "m0609_ik": ALL,
         "m1013_ik": ALL,
@@ -132,8 +131,7 @@ KNOWN_REVERSE: dict[str, dict[str, tuple[str, ...]]] = {
         "piper_ik": ALL,
         "ur16e_ik": ("linux",),
         "ur20_ik": ("linux",),
-        "xarm6_ik": ALL,
-        "xmatecr7_ik": ALL,
+        "xarm6_ik": ("linux",),
     },
 }
 
@@ -164,7 +162,10 @@ def _cells(direction: str, known: dict[str, dict[str, tuple[str, ...]]]) -> list
             where = known.get(cls, {}).get(arm, ())
             if where:
                 issue, title = npar.CLASSES[cls]
-                if cls in npar.ROUNDOFF_CLASSES:
+                if (
+                    cls in npar.ROUNDOFF_CLASSES
+                    or (direction, cls, arm) in npar.RUNNER_DEPENDENT_CELLS
+                ):
                     reason = f"#{issue}: {title} (round-off: varies by machine)"
                     marks.append(pytest.mark.xfail(strict=False, reason=reason))
                 else:
