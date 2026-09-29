@@ -351,8 +351,13 @@ def _jointlock_rr_complete(arm: str, kb: KinBody, n_probe: int = 150) -> bool:
     header structure (that has to be byte-deterministic for the --check drift
     guard, #536). Run this when adding a jointlock arm; bake the answer.
 
-    True iff a native RR-only lock-sweep (no HP kernel, no rescue) can cover the
-    arm, tested two ways over n_probe reachable poses (#535):
+    True iff a native RR-only lock-sweep (no HP kernel, no rescue) covers the
+    oracle on n_probe random reachable poses, tested two ways (#535). This is
+    evidence, not a proof of coverage everywhere: a pose whose self-motion
+    reaches the lock joint only between two samples has an empty sweep on both
+    backends (#617, ~5e-5 of random poses on rizon4 / rizon10), so the native RR
+    path runs the empty-gated rescue that Python's artifact runs. The probe
+    tests the bare sweep, so that runtime rescue cannot make it pass:
 
     1. HP-fire: if the Python oracle ever dispatches to the HP Study-quaternion
        kernel, an RR-only artifact CANNOT reproduce that pose by definition (HP
@@ -1017,10 +1022,10 @@ _MATCH_TOL = {6: 1e-3, 7: 1e-2}
 _KNOWN_INCOMPLETE: dict[str, tuple[dict[str, int], str]] = {
     # The monic-companion eigensolve loses real roots at degenerate lock samples.
     "kassow_kr810_ik": ({"darwin": 1, "linux": 3}, "#544 (HP jointlock eigensolve)"),
-    # These golden poses' solutions come from Python's T-perturbation rescue
-    # (the analytic set is empty), which native runs with its own RNG and polish.
-    "yumi_left_ik": ({"linux": 2}, "#622 (rescue differs between backends)"),
-    "yumi_right_ik": ({"darwin": 1, "linux": 2}, "#622 (rescue differs between backends)"),
+    # Python's in-limits resolver misses a narrow feasible swivel arc that
+    # native's finds, so these golden poses hold Python's rescue samples of the
+    # arc, while native returns its own analytic samples and never rescues.
+    "yumi_left_ik": ({"linux": 2}, "#462 (srs_polished in-limits swivel arc)"),
 }
 
 
