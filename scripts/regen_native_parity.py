@@ -12,7 +12,7 @@ Writes two files next to the gate (tests/test_native_parity.py):
     every platform's pins, so on each platform it fails the same cells as
     the full tier.
   - ``pinned``: in-limits configurations at which a backend once returned
-    [], each with its issue, added by hand and never rewritten here.
+    [] or raised, each with its issue, added by hand and never rewritten here.
 - ``tests/data/native_parity_oracle.json``: the chart-free branch oracle's
   verdict at every 6R pose where it was consulted. The gate looks a pose up
   here and runs the oracle live only for a pose this file lacks, so a missing
@@ -28,11 +28,11 @@ workflow dispatched with ``regen=true``
 KNOWN_* tables merge every platform recorded so far; paste them into the
 gate. A rerun on the same platform reproduces both files byte for byte.
 
-The round-off class (``ROUNDOFF_CLASSES``: exact-limit angles, #632) also
-flips between CI runners of one platform, and so do the few strict-class
-cells in ``RUNNER_DEPENDENT_CELLS``, so such a cell that a CI run shows but
-the regeneration run did not is recorded by hand under the ``ci`` key of
-that arm's ``cells``, which no rerun overwrites.
+A cell of a round-off class (``ROUNDOFF_CLASSES``, none at present) or one
+of the few strict-class cells in ``RUNNER_DEPENDENT_CELLS`` can flip between
+CI runners of one platform, so such a cell that a CI run shows but the
+regeneration run did not is recorded by hand under the ``ci`` key of that
+arm's ``cells``, which no rerun overwrites.
 
     uv run python scripts/regen_native_parity.py            # this platform's cells
     uv run python scripts/regen_native_parity.py --arm ur5_ik --arm fr3_ik
