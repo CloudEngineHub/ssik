@@ -2532,7 +2532,9 @@ bench = [
 demo = [
     { name = "imageio" },
     { name = "robot-descriptions" },
+    { name = "urchin" },
     { name = "viser" },
+    { name = "xacrodoc" },
     { name = "yourdfpy" },
 ]
 mjcf = [
@@ -2558,6 +2560,7 @@ dev = [
     { name = "ruff" },
     { name = "setuptools" },
     { name = "urchin" },
+    { name = "viser" },
     { name = "xacrodoc" },
     { name = "yourdfpy" },
 ]
@@ -2578,9 +2581,11 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.13" },
     { name = "sympy", specifier = ">=1.10" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.1.0" },
+    { name = "urchin", marker = "extra == 'demo'", specifier = ">=0.0.27" },
     { name = "urchin", marker = "extra == 'urdf'", specifier = ">=0.0.27" },
     { name = "urchin", marker = "extra == 'xacro'", specifier = ">=0.0.27" },
     { name = "viser", marker = "extra == 'demo'", specifier = ">=1.0" },
+    { name = "xacrodoc", marker = "extra == 'demo'", specifier = ">=2.0.1" },
     { name = "xacrodoc", marker = "extra == 'xacro'", specifier = ">=2.0.1" },
     { name = "yourdfpy", marker = "extra == 'demo'", specifier = ">=0.0.60" },
 ]
@@ -2598,6 +2603,7 @@ dev = [
     { name = "ruff", specifier = ">=0.8" },
     { name = "setuptools", specifier = ">=70" },
     { name = "urchin", specifier = ">=0.0.27" },
+    { name = "viser", specifier = ">=1.0" },
     { name = "xacrodoc", specifier = ">=2.0.1" },
     { name = "yourdfpy", specifier = ">=0.0.60" },
 ]

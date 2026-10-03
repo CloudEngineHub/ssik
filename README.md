@@ -47,6 +47,20 @@ For a 6R arm, the list contains the certified isolated IK branches ssik recovere
 
 An empty list means **no certified solution was returned** — which, by itself, is not a mathematical proof that the pose is unreachable. Use `explain=True` when diagnosing an empty result.
 
+### Examples
+
+The scripts in [`examples/`](examples/) run headless except the viewer (05, which also has scripted headless modes). 01–04 and 07 check the claims they print and exit non-zero if one fails, and the test suite checks 05 and 06; CI runs them all against the built wheel with [`scripts/run_examples.py`](scripts/run_examples.py). `pip install 'ssik[demo]'` installs what all of them need.
+
+| Script | Shows |
+|---|---|
+| [`01_quickstart.py`](examples/01_quickstart.py) | `list_arms`, `from_prebuilt`, fk/solve, joint limits and windings, input validation, `explain=True` |
+| [`02_trajectory_tracking.py`](examples/02_trajectory_tracking.py) | seeded tracking through a wrist singularity, `seed_metric` / `seed_tolerance`, `solve_path` |
+| [`03_your_own_robot.py`](examples/03_your_own_robot.py) | `from_urdf` on a non-Pieper URDF, the one-time derivation cost, `ssik build`, limit filtering |
+| [`04_redundant_arms.py`](examples/04_redundant_arms.py) | 7-DOF self-motion (Panda); sampled solutions and seeded tracking (Gen3) |
+| [`05_viser_interactive_ik.py`](examples/05_viser_interactive_ik.py) | the interactive viewer below |
+| [`06_teleop.py`](examples/06_teleop.py) | teleoperation with `ssik.Tracker` and the `ssik.teleop` frame helpers, from a scripted device |
+| [`07_cpp_from_the_wheel.py`](examples/07_cpp_from_the_wheel.py) | the C++ headers and solver input shipped in the wheel |
+
 ### See every branch at once
 
 ```bash
@@ -54,11 +68,11 @@ pip install 'ssik[demo]'
 python examples/05_viser_interactive_ik.py
 ```
 
-Opens a browser viewer: drag a 3D handle and watch every analytical IK solution render as a live arm in real time. Cycle through the full prebuilt roster, including the non-Pieper 6R and 7R arms EAIK refuses.
+Opens a browser viewer: drag a 3D handle and watch every analytical IK solution render as a live arm in real time. Cycle through 19 of the <!-- AUTOGEN:arm_count -->72<!-- /AUTOGEN --> prebuilt arms, including the non-Pieper 6R and 7R arms EAIK refuses. Arms that `robot_descriptions` packages are drawn with their meshes, fetched on first use; the others are drawn as a joint-and-link skeleton.
 
 #### Eight arms, every analytical branch
 
-Each loop below is one arm's interactive demo running for ~3 seconds: the live red arm tracks the marker; the faded reds are the other analytical IK branches at the same instant. Captured from [`examples/05_viser_interactive_ik.py`](examples/05_viser_interactive_ik.py).
+Each loop below is one arm's interactive demo running for ~3 seconds: one arm tracks the marker, and the other analytical IK branches at the same instant are drawn in the same red, since each is an equally valid solution. Captured from [`examples/05_viser_interactive_ik.py`](examples/05_viser_interactive_ik.py) before ssik 7.0.
 
 **UR5**: three-parallel 6R (Pieper). EAIK supports this class.
 
@@ -616,7 +630,7 @@ A 7R arm holding a 6-DOF pose is not at a point in configuration space, it is on
 
 <img src="docs/assets/self_motion.gif" alt="A Franka Panda sweeping one branch of its self-motion manifold: the elbow travels from folded to fully extended while the gripper and its frame stay exactly in place." height="256">
 
-One Panda, one target, one branch. The shoulder and elbow travel several radians while the hand does not move: every frame is an exact IK solution for the same pose, not an interpolation between two of them. Reproduce it with `python examples/06_self_motion.py` (no display needed) or `python examples/05_viser_interactive_ik.py --self-motion`.
+One Panda, one target, one branch. The shoulder and elbow travel several radians while the hand does not move: every frame is an exact IK solution for the same pose, not an interpolation between two of them. `python examples/04_redundant_arms.py` checks that claim on a Panda branch with no display; `python examples/05_viser_interactive_ik.py --self-motion` animates it.
 
 ```python
 arm = ssik.Manipulator.from_prebuilt("panda")   # charts live on Manipulator
