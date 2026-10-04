@@ -345,6 +345,10 @@ While held the tracker keeps following the branch it was on, so it resumes
 `moved` (from the previous step's `q`), `branch_distance` (`nan` when there
 was no candidate), `lag`, and `t`.
 
+**Threads.** A `Tracker` is not thread-safe. Every call reads and changes its
+state (the branch followed, the configuration, the last timestamp), so call it
+from one thread at a time.
+
 **Branches.** `solutions(max_solutions=None)` returns every configuration at
 the target the tracker last accepted (`tracker.target`), nearest the followed
 branch first, one per geometric branch (`enumerate_windings=False`); on a
@@ -460,11 +464,18 @@ argument's name in the message.
 | Helper | Returns |
 |---|---|
 | `invert(T)` | `[R^T, -R^T p]` |
-| `calibration_from(T_device, T_robot)` | `base_T_world = T_robot @ T_device^-1`, the calibration that maps this device reading onto this robot pose |
-| `apply_calibration(calibration, T_device)` | `calibration @ T_device`: a reading `world_T_device` in the arm's base frame |
+| `calibration_from(T_device, T_robot)` | `base_T_tracking = T_robot @ T_device^-1`, the calibration that maps this device reading onto this robot pose |
+| `apply_calibration(calibration, T_device)` | `calibration @ T_device`: a reading `tracking_T_device` in the arm's base frame |
 | `tcp_to_flange(T_tcp, flange_T_tcp)` | `T_tcp @ flange_T_tcp^-1`: the flange pose that puts the tool centre point at `T_tcp` (what IK solves for) |
 | `flange_to_tcp(T_flange, flange_T_tcp)` | `T_flange @ flange_T_tcp`: the TCP pose at a flange pose |
 | `scale_about(T, scale, anchor)` | position `a + scale * (p - a)` about the anchor point `a` (a `(3,)` point, or a pose's position, in `T`'s frame), rotation unchanged |
+
+**Calibration.** A device reports its poses in its own fixed frame, the
+tracking frame. The calibration is `base_T_tracking`, the tracking frame in
+the arm's base frame. When the arm is mounted in a world frame of its own (a
+frame aligned with the room, with the arm at a shoulder), it is
+`base_T_world @ world_T_tracking`: `world_T_tracking` comes from the device
+setup and `base_T_world = invert(world_T_base)` from the arm's mounting.
 
 **Clutch.** Relative teleoperation: the arm follows the device's motion since
 the grip was pressed, not its absolute pose. `engage(T_device, T_robot)`
@@ -512,6 +523,11 @@ In both conventions:
   without moving the arm. Engaging again at the current device pose and
   target continues exactly where the clutch was.
 - The two agree when the device and arm anchors have the same orientation.
+- Both commute with a common rigid change of frame `X`: engaging at `X @ A_d`
+  and `X @ A_r` and reading `X @ D` gives `X @ target(D)`. Clutching in the
+  base frame after calibration therefore equals clutching in the world frame,
+  so with `frame="world"` a hand moved along the room's +x moves the tool
+  along the room's +x, wherever the arm is mounted.
 
 Engage with the arm's actual pose, `flange_to_tcp(arm.fk(tracker.q), tool)`,
 so a rate-limited arm that is still catching up is anchored where it is.
